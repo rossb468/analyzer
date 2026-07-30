@@ -191,7 +191,7 @@ fn fill_cosine(samples: &mut [f32], coeffs: Cosine) {
             .iter()
             .enumerate()
             .map(|(k, a)| {
-                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                let sign = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
                 sign * a * (k as f32 * phase).cos()
             })
             .sum();

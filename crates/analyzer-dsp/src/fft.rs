@@ -64,7 +64,7 @@ impl RealFft {
     /// not meaningful otherwise.
     pub fn new(size: usize) -> Self {
         assert!(
-            size >= 2 && size % 2 == 0,
+            size >= 2 && size.is_multiple_of(2),
             "FFT size must be even and at least 2, got {size}"
         );
         let plan = RealFftPlanner::<f32>::new().plan_fft_forward(size);

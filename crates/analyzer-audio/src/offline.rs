@@ -39,9 +39,8 @@ impl Source {
     /// frames.
     pub fn new(samples: Vec<f32>, channels: usize, sample_rate: f64) -> Self {
         assert!(channels > 0, "source must have at least one channel");
-        assert_eq!(
-            samples.len() % channels,
-            0,
+        assert!(
+            samples.len().is_multiple_of(channels),
             "sample count must be a whole number of frames"
         );
         Self {
