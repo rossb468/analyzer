@@ -15,6 +15,7 @@
 
 pub mod deconv;
 pub mod delay;
+pub mod distortion;
 pub mod fft;
 pub mod generator;
 pub mod ir;
@@ -27,6 +28,7 @@ pub mod window;
 
 pub use deconv::{Deconvolver, ImpulseResponse};
 pub use delay::{DelayEstimate, DelayFinder};
+pub use distortion::{Distortion, DistortionConfig, Harmonic};
 pub use fft::{Fft, RealFft};
 pub use generator::{Generator, Signal};
 pub use ir::{Gate, GatedResponse, ReverbTime, gated_response, reverb_time, schroeder_decay};
