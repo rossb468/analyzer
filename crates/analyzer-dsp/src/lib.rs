@@ -13,6 +13,7 @@
 //! callback with a hard deadline, and an allocation with an unbounded worst case
 //! eventually surfaces as a dropped block and a silently corrupted measurement.
 
+pub mod deconv;
 pub mod delay;
 pub mod fft;
 pub mod generator;
@@ -23,6 +24,7 @@ pub mod spectrum;
 pub mod transfer;
 pub mod window;
 
+pub use deconv::{Deconvolver, ImpulseResponse};
 pub use delay::{DelayEstimate, DelayFinder};
 pub use fft::{Fft, RealFft};
 pub use generator::{Generator, Signal};
