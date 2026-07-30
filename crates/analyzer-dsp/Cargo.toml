@@ -11,3 +11,5 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+realfft = { workspace = true }
+rustfft = { workspace = true }
