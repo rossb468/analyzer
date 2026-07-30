@@ -12,6 +12,7 @@
 
 mod bench;
 mod live;
+mod measure;
 mod report;
 
 use std::fs;
@@ -45,6 +46,11 @@ INPUT:
     --live [seconds]     Capture from hardware (default 5 seconds)
     --list-devices       Show every audio device and exit
     --bench [seconds]    Measure analysis throughput and ring behaviour (default 2)
+
+SWEPT MEASUREMENT:
+    --measure <a> <b>    Deconvolve response <b> against stimulus <a>
+    --measure-demo       Build a synthetic room and measure it end to end
+    --gate <ms>          Gate length for the quasi-anechoic response (default 5)
 
 ANALYSIS:
     --fft <n>            FFT size, even (default 4096)
@@ -96,6 +102,7 @@ struct Args {
     min_db: Option<f32>,
     peak_only: bool,
     meter: bool,
+    gate_ms: f32,
     out: Option<PathBuf>,
 }
 
@@ -128,6 +135,11 @@ enum Input {
     Bench {
         seconds: f64,
     },
+    MeasureDemo,
+    Measure {
+        stimulus: PathBuf,
+        response: PathBuf,
+    },
 }
 
 fn run() -> Result<(), String> {
@@ -139,6 +151,20 @@ fn run() -> Result<(), String> {
     let report = match &args.input {
         Input::ListDevices => live::list_devices()?,
         Input::Bench { seconds } => bench::run(*seconds),
+        Input::MeasureDemo => measure::demo(&measure::MeasureOptions {
+            gate_ms: args.gate_ms,
+            fft: args.fft,
+            ..measure::MeasureOptions::default()
+        })?,
+        Input::Measure { stimulus, response } => measure::from_files(
+            stimulus,
+            response,
+            &measure::MeasureOptions {
+                gate_ms: args.gate_ms,
+                fft: args.fft,
+                ..measure::MeasureOptions::default()
+            },
+        )?,
         Input::Live { device, seconds } => {
             let options = live::LiveOptions {
                 device: device.clone(),
@@ -324,13 +350,15 @@ fn load_source(args: &Args) -> Result<Source, String> {
                 .collect();
             Ok(Source::mono(samples, *rate))
         }
-        Input::Live { .. } | Input::ListDevices | Input::Bench { .. } => {
-            Err("this mode does not load a source".into())
-        }
+        Input::Live { .. }
+        | Input::ListDevices
+        | Input::Bench { .. }
+        | Input::MeasureDemo
+        | Input::Measure { .. } => Err("this mode does not load a source".into()),
     }
 }
 
-fn read_wav(path: &Path) -> Result<Source, String> {
+pub(crate) fn read_wav(path: &Path) -> Result<Source, String> {
     use hound::SampleFormat;
 
     let mut reader =
@@ -397,6 +425,9 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut min_db: Option<f32> = None;
     let mut peak_only = false;
     let mut meter = true;
+    let mut gate_ms = 5.0_f32;
+    let mut measure_demo = false;
+    let mut measure_pair: Option<(PathBuf, PathBuf)> = None;
     let mut out: Option<PathBuf> = None;
 
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
@@ -413,6 +444,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--peak" => peak_only = true,
             "--no-meter" => meter = false,
             "--list-devices" => list_devices = true,
+            "--measure-demo" => measure_demo = true,
+            "--gate" => gate_ms = number(&value()?, "--gate")?,
+            "--measure" => {
+                let stimulus = PathBuf::from(value()?);
+                let response = PathBuf::from(value()?);
+                measure_pair = Some((stimulus, response));
+            }
             "--bench" => {
                 let duration = match argv.last() {
                     Some(next) if next.parse::<f64>().is_ok() => {
@@ -498,6 +536,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         live_seconds.is_some(),
         list_devices,
         bench_seconds.is_some(),
+        measure_demo,
+        measure_pair.is_some(),
     ]
     .iter()
     .filter(|chosen| **chosen)
@@ -508,6 +548,10 @@ fn parse_args() -> Result<Option<Args>, String> {
 
     let input = if list_devices {
         Input::ListDevices
+    } else if measure_demo {
+        Input::MeasureDemo
+    } else if let Some((stimulus, response)) = measure_pair {
+        Input::Measure { stimulus, response }
     } else if let Some(seconds) = bench_seconds {
         if seconds <= 0.0 {
             return Err("--bench duration must be positive".into());
@@ -548,6 +592,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         min_db,
         peak_only,
         meter,
+        gate_ms,
         out,
     }))
 }

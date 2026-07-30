@@ -183,7 +183,21 @@ pub fn gated_response(ir: &ImpulseResponse, gate: &Gate, fft_size: usize) -> Opt
 /// The curve is normalised to 0 dB at the start.
 pub fn schroeder_decay(ir: &ImpulseResponse) -> Vec<f32> {
     let start = (ir.peak_samples.max(0.0)) as usize;
-    let tail = ir.samples.get(start..).unwrap_or(&[]);
+    let full_tail = ir.samples.get(start..).unwrap_or(&[]);
+    if full_tail.is_empty() {
+        return Vec::new();
+    }
+
+    // Truncate at the noise floor before integrating.
+    //
+    // Integrating a long noise floor is not harmless. The floor's total energy
+    // can rival or exceed the decay's, which holds the curve near 0 dB right
+    // through the part that matters and then declines slowly for seconds. A fit
+    // spanning that reports a reverberation time of minutes. Measured on the
+    // synthetic room this module is tested against, EDT came out at 1083
+    // seconds before this truncation and 0.5 after it.
+    let usable = noise_floor_index(full_tail);
+    let tail = full_tail.get(..usable).unwrap_or(full_tail);
     if tail.is_empty() {
         return Vec::new();
     }
@@ -208,6 +222,51 @@ pub fn schroeder_decay(ir: &ImpulseResponse) -> Vec<f32> {
         };
     }
     curve
+}
+
+/// Where the response drops into its own noise floor.
+///
+/// A simplified Lundeby: estimate the floor from the last part of the record,
+/// then find where the energy envelope last stands clear of it. Everything after
+/// that point is measurement noise rather than the room, and integrating it
+/// corrupts every reverberation estimate.
+///
+/// Returns the full length when no floor is detectable, which is the right
+/// answer for a synthetic response that decays to exactly zero.
+fn noise_floor_index(samples: &[f32]) -> usize {
+    const BLOCK: usize = 512;
+    /// Keep integrating until the envelope is within this much of the floor.
+    const MARGIN_DB: f32 = 10.0;
+
+    if samples.len() < BLOCK * 8 {
+        return samples.len();
+    }
+
+    let energy: Vec<f32> = samples
+        .chunks(BLOCK)
+        .map(|block| block.iter().map(|s| s * s).sum::<f32>() / block.len() as f32)
+        .collect();
+
+    // The floor, taken from the last tenth of the record.
+    let floor_start = energy.len() - energy.len() / 10;
+    let floor_blocks = energy.get(floor_start..).unwrap_or(&[]);
+    if floor_blocks.is_empty() {
+        return samples.len();
+    }
+    let floor = floor_blocks.iter().sum::<f32>() / floor_blocks.len() as f32;
+    if floor <= 0.0 {
+        return samples.len();
+    }
+
+    let threshold = floor * 10.0_f32.powf(MARGIN_DB / 10.0);
+    let last_above = energy.iter().rposition(|value| *value > threshold);
+
+    match last_above {
+        // One block of headroom past the last clearly-signal block.
+        Some(index) => ((index + 2) * BLOCK).min(samples.len()),
+        // Never clears the floor, so there is nothing to truncate against.
+        None => samples.len(),
+    }
 }
 
 /// Reverberation time, estimated three ways.

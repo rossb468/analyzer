@@ -215,9 +215,23 @@ impl Deconvolver {
             *sample *= scale;
         }
 
-        let peak = locate_peak(&self.result)?;
+        // Keep only the causal region.
+        //
+        // The transform is circular, so anything the deconvolution produces at
+        // negative time - acausal pre-ringing, and whatever the regularisation
+        // leaves behind - lands at the far end of the buffer. It is not part of
+        // the decay and it is large enough to matter: left in place it holds a
+        // Schroeder integral flat for seconds and then plunges, which reads as a
+        // reverberation time of minutes.
+        //
+        // No more impulse response can be recovered than the length of the
+        // recording, so that is the bound.
+        let causal = response.len().min(self.result.len());
+        let samples = self.result.get(..causal).unwrap_or(&self.result).to_vec();
+
+        let peak = locate_peak(&samples)?;
         Some(ImpulseResponse {
-            samples: self.result.clone(),
+            samples,
             peak_samples: peak,
             sample_rate: self.sample_rate,
         })
@@ -488,21 +502,44 @@ mod tests {
             .unwrap();
         let barely = deconvolver.deconvolve(&stimulus, &response, 1e-12).unwrap();
 
-        // With almost no regularisation the unexcited bands amplify noise, so
-        // the peak stands out far less against the rest of the trace.
-        let clarity = |ir: &ImpulseResponse| {
-            let peak = ir.peak_amplitude();
-            let mean = ir.samples.iter().map(|s| s.abs()).sum::<f32>() / ir.samples.len() as f32;
-            peak / mean.max(1e-20)
+        // The meaningful question is how much of the recovered energy actually
+        // lands on the impulse. The system here is a pure 100-sample delay, so
+        // the ideal answer is a single spike and anything elsewhere is the
+        // unexcited bands amplifying noise.
+        //
+        // Two earlier attempts at this assertion measured the wrong thing.
+        // Peak-to-mean stopped discriminating once the impulse was trimmed to
+        // its causal region, and a peak-relative noise floor is blind precisely
+        // when it matters: with almost no regularisation the amplified noise
+        // *becomes* the peak, so dividing by it hides the failure.
+        let concentration = |ir: &ImpulseResponse| -> f32 {
+            let total: f32 = ir.samples.iter().map(|s| s * s).sum();
+            if total <= 0.0 {
+                return 0.0;
+            }
+            let near: f32 = ir
+                .samples
+                .get(90..111)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| s * s)
+                .sum();
+            near / total
         };
-        // The improvement is real but modest - roughly 1.5x on this signal.
-        // Asserting a bigger number would be fitting the test to one input.
+
         assert!(
-            clarity(&regularised) > clarity(&barely) * 1.3,
-            "regularisation should sharpen the impulse: {:.0} vs {:.0}",
-            clarity(&regularised),
-            clarity(&barely)
+            concentration(&regularised) > concentration(&barely) * 2.0,
+            "regularisation should concentrate energy on the true impulse: \
+             {:.1}% vs {:.1}%",
+            concentration(&regularised) * 100.0,
+            concentration(&barely) * 100.0
         );
+        // Deliberately not asserting the peak lands at 100. With a sweep
+        // covering only a third of the spectrum and broadband noise across all
+        // of it, regularisation substantially improves the result without
+        // rescuing it - the global peak can still sit in the unexcited region.
+        // Claiming otherwise would be asserting something this scenario does not
+        // support.
     }
 
     #[test]
