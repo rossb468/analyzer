@@ -32,9 +32,15 @@ unreachable_pub = "warn"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
-# Real-time audio code must never hide an allocation or a panic behind a convenience.
-indexing_slicing = "warn"
+# Nothing on the real-time path may panic on an Option or Result it did not
+# check. This one is cheap to satisfy everywhere.
 unwrap_used = "warn"
+
+# clippy::indexing_slicing is deliberately NOT set workspace-wide. In DSP code
+# slice arithmetic is the point and bounds are locally provable, so a blanket
+# warning produces noise and a wall of allow attributes. Modules that sit
+# directly on the real-time path, where a panic is unrecoverable rather than
+# merely a failed test, opt in with #![deny(clippy::indexing_slicing)].
 
 [profile.release]
 lto = "thin"
