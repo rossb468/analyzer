@@ -16,6 +16,12 @@ version = "0.1.0"
 [[package]]
 name = "analyzer-cli"
 version = "0.1.0"
+dependencies = [
+ "analyzer-audio",
+ "analyzer-dsp",
+ "analyzer-engine",
+ "hound",
+]
 
 [[package]]
 name = "analyzer-dsp"
@@ -63,6 +69,12 @@ name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+
+[[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "num-complex"

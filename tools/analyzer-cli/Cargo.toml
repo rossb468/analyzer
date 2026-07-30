@@ -11,3 +11,10 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+analyzer-audio = { workspace = true }
+analyzer-dsp = { workspace = true }
+analyzer-engine = { workspace = true }
+hound = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
