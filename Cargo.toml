@@ -17,6 +17,7 @@ analyzer-dsp = { path = "crates/analyzer-dsp" }
 analyzer-engine = { path = "crates/analyzer-engine" }
 analyzer-model = { path = "crates/analyzer-model" }
 analyzer-plot = { path = "crates/analyzer-plot" }
+cbindgen = "0.29"
 
 # External.
 assert_no_alloc = "1.1"

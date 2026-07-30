@@ -7,7 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+# staticlib for the Xcode link, rlib so Rust tests can exercise the surface.
+crate-type = ["staticlib", "rlib"]
+
 [lints]
 workspace = true
 
 [dependencies]
+analyzer-audio = { workspace = true }
+analyzer-dsp = { workspace = true }
+analyzer-engine = { workspace = true }
+analyzer-plot = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }
