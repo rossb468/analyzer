@@ -11,6 +11,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+analyzer-dsp = { workspace = true }
 assert_no_alloc = { workspace = true }
 rtrb = { workspace = true }
 triple_buffer = { workspace = true }

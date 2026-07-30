@@ -35,6 +35,7 @@ dependencies = [
 name = "analyzer-engine"
 version = "0.1.0"
 dependencies = [
+ "analyzer-dsp",
  "assert_no_alloc",
  "rtrb",
  "triple_buffer",

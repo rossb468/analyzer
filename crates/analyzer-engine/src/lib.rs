@@ -21,10 +21,12 @@
 //! - [`snapshot`] publishes finished results to the UI, newest-wins.
 //! - [`rt`] enforces allocation-freedom instead of trusting it.
 
+pub mod engine;
 pub mod ring;
 pub mod rt;
 pub mod snapshot;
 
+pub use engine::{Engine, EngineConfig, SpectrumFrame};
 pub use ring::{CaptureSink, CaptureSource, capture_ring, deinterleave};
 pub use rt::{AllocTrap, permit_alloc, rt_section};
 pub use snapshot::{SnapshotPublisher, SnapshotReader, snapshot_channel};
