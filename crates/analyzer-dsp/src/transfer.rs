@@ -275,6 +275,26 @@ impl TransferFunction {
         }
     }
 
+    /// The complex response `H₁` itself.
+    ///
+    /// Magnitude and phase separately are what a display wants, but anything
+    /// that interpolates between frequencies needs the complex value: averaging
+    /// two phases across a ±180° wrap gives an answer pointing the wrong way.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is not one element per bin.
+    pub fn write_response(&self, out: &mut [Complex32]) {
+        assert_eq!(out.len(), self.gxx.len(), "output must be one per bin");
+        for ((slot, cross), auto) in out.iter_mut().zip(&self.gxy).zip(&self.gxx) {
+            *slot = if *auto > 0.0 {
+                cross / *auto
+            } else {
+                Complex32::default()
+            };
+        }
+    }
+
     /// Phase of `H₁` in degrees, wrapped to `-180..=180`.
     ///
     /// # Panics
