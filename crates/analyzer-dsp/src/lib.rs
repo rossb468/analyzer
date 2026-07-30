@@ -16,6 +16,7 @@
 pub mod delay;
 pub mod fft;
 pub mod generator;
+pub mod meter;
 pub mod spectrum;
 pub mod transfer;
 pub mod window;
@@ -23,6 +24,7 @@ pub mod window;
 pub use delay::{DelayEstimate, DelayFinder};
 pub use fft::{Fft, RealFft};
 pub use generator::{Generator, Signal};
+pub use meter::{Integration, LevelMeter, MeterWeighting};
 pub use spectrum::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig};
 pub use transfer::{TransferAveraging, TransferConfig, TransferFunction, unwrap_phase_degrees};
 pub use window::{Window, WindowKind};
