@@ -596,6 +596,41 @@ mod tests {
         assert!(d.harmonic(4).is_none(), "H4 was not asked for");
     }
 
+    /// The FFI hands this module power recovered from the published decibels
+    /// rather than the analyzer's own power array, because the frame carries dB.
+    /// That inversion has to be lossless enough not to move the answer.
+    #[test]
+    fn power_recovered_from_decibels_gives_the_same_answer() {
+        let (power, spacing) = spectrum_of(1000.0, &[(2, 0.01), (3, 0.003)], 0.0);
+
+        // Exactly what the engine publishes, then exactly what the FFI does to
+        // get back: db = 10*log10(2*power), power = 10^(db/10)/2.
+        let round_tripped: Vec<f32> = power
+            .iter()
+            .map(|p| {
+                let db = if *p > 0.0 {
+                    (10.0 * (2.0 * p).log10()).max(-200.0)
+                } else {
+                    -200.0
+                };
+                10.0_f32.powf(db / 10.0) / 2.0
+            })
+            .collect();
+
+        let config = DistortionConfig::default();
+        let direct = analyse(&power, spacing, None, &config).unwrap();
+        let via_db = analyse(&round_tripped, spacing, None, &config).unwrap();
+
+        assert!(
+            (direct.thd_percent - via_db.thd_percent).abs() < 0.01,
+            "THD moved through the round trip: {:.4}% vs {:.4}%",
+            direct.thd_percent,
+            via_db.thd_percent
+        );
+        assert!((direct.fundamental_hz - via_db.fundamental_hz).abs() < 1.0);
+        assert_eq!(direct.harmonics.len(), via_db.harmonics.len());
+    }
+
     #[test]
     fn degenerate_input_is_refused() {
         let config = DistortionConfig::default();

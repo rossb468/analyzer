@@ -32,7 +32,7 @@ use std::ptr;
 use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
-use analyzer_dsp::{Averaging, Overlap, SpectrumConfig, WindowKind};
+use analyzer_dsp::{Averaging, DistortionConfig, Overlap, SpectrumConfig, WindowKind};
 use analyzer_engine::{Engine, EngineConfig, rt_section};
 use analyzer_plot::{FrequencyAxis, LevelAxis, Reduction, Trace, reduce};
 
@@ -384,6 +384,60 @@ pub struct AnalyzerFrameInfo {
     pub bin_spacing_hz: f32,
 }
 
+/// Harmonic orders reported across the boundary.
+///
+/// A fixed array keeps the struct POD with nothing for the caller to free. Ten
+/// is what an audio measurement conventionally covers, and anything beyond it is
+/// below the noise floor of any real system.
+pub const ANALYZER_MAX_HARMONICS: usize = 10;
+
+/// A distortion measurement.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerDistortion {
+    /// Fundamental frequency found in the spectrum.
+    pub fundamental_hz: f32,
+    /// Its level.
+    pub fundamental_db: f32,
+    /// Total harmonic distortion as a percentage of the fundamental.
+    pub thd_percent: f32,
+    /// The same figure in decibels.
+    pub thd_db: f32,
+    /// Distortion plus noise: everything that is not the fundamental.
+    pub thd_n_percent: f32,
+    /// Median level of the bins that are neither fundamental nor harmonic.
+    pub noise_floor_db: f32,
+    /// How many entries of the harmonic arrays are populated.
+    pub harmonic_count: u32,
+    /// Orders that fall above Nyquist and were therefore not measured. Non-zero
+    /// means the THD figure covers fewer orders than the full set.
+    pub orders_above_nyquist: u32,
+    /// Frequency of each harmonic found.
+    pub harmonic_hz: [f32; ANALYZER_MAX_HARMONICS],
+    /// Each harmonic as a percentage of the fundamental.
+    pub harmonic_percent: [f32; ANALYZER_MAX_HARMONICS],
+    /// Each harmonic relative to the fundamental, in decibels.
+    pub harmonic_relative_db: [f32; ANALYZER_MAX_HARMONICS],
+}
+
+impl Default for AnalyzerDistortion {
+    fn default() -> Self {
+        Self {
+            fundamental_hz: 0.0,
+            fundamental_db: 0.0,
+            thd_percent: 0.0,
+            thd_db: 0.0,
+            thd_n_percent: 0.0,
+            noise_floor_db: 0.0,
+            harmonic_count: 0,
+            orders_above_nyquist: 0,
+            harmonic_hz: [0.0; ANALYZER_MAX_HARMONICS],
+            harmonic_percent: [0.0; ANALYZER_MAX_HARMONICS],
+            harmonic_relative_db: [0.0; ANALYZER_MAX_HARMONICS],
+        }
+    }
+}
+
 /// A gridline.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -414,6 +468,8 @@ pub struct AnalyzerSession {
     trace: Trace,
     average_trace: Trace,
     bins: Vec<f32>,
+    /// Scratch for the distortion analysis, which needs linear power.
+    power: Vec<f32>,
     device_name: String,
 }
 
@@ -574,6 +630,7 @@ fn start_session(
         trace: Trace::default(),
         average_trace: Trace::default(),
         bins: Vec::new(),
+        power: Vec::new(),
         device_name: device.name,
     })
 }
@@ -811,6 +868,89 @@ pub unsafe extern "C" fn analyzer_session_frame_info(
     })
 }
 
+/// Measure harmonic distortion in the current live spectrum.
+///
+/// Returns false when no fundamental stands far enough above the noise floor for
+/// the figure to mean anything — distortion of a room's background hiss is not a
+/// number worth showing, and a UI should hide the readout rather than display
+/// a plausible-looking one.
+///
+/// `fundamental_hz` may be zero to use the loudest peak, or set explicitly when
+/// the stimulus frequency is known.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_distortion(
+    session: *mut AnalyzerSession,
+    fundamental_hz: f32,
+    out: *mut AnalyzerDistortion,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+
+        // The frame carries decibels; the analysis needs linear power. The dB
+        // came from power in the first place, so this inverts exactly the
+        // conversion that produced it. Round-tripping through f32 dB costs far
+        // less precision than the measurement itself has.
+        let spacing = {
+            let frame = session.engine.latest();
+            session.power.clear();
+            session
+                .power
+                .extend(frame.bins.iter().map(|db| 10.0_f32.powf(db / 10.0) / 2.0));
+            frame.bin_spacing_hz
+        };
+
+        let hint = (fundamental_hz > 0.0).then_some(fundamental_hz);
+        let Some(result) = analyzer_dsp::distortion::analyse(
+            &session.power,
+            spacing,
+            hint,
+            &DistortionConfig::default(),
+        ) else {
+            return false;
+        };
+
+        // A fundamental buried in the floor makes every derived figure noise.
+        const MINIMUM_HEADROOM_DB: f32 = 20.0;
+        if result.fundamental_db < result.noise_floor_db + MINIMUM_HEADROOM_DB {
+            return false;
+        }
+
+        let mut value = AnalyzerDistortion {
+            fundamental_hz: result.fundamental_hz,
+            fundamental_db: result.fundamental_db,
+            thd_percent: result.thd_percent,
+            thd_db: result.thd_db,
+            thd_n_percent: result.thd_n_percent,
+            noise_floor_db: result.noise_floor_db,
+            harmonic_count: 0,
+            orders_above_nyquist: result.orders_above_nyquist,
+            ..AnalyzerDistortion::default()
+        };
+        for (index, harmonic) in result
+            .harmonics
+            .iter()
+            .take(ANALYZER_MAX_HARMONICS)
+            .enumerate()
+        {
+            value.harmonic_hz[index] = harmonic.hz;
+            value.harmonic_percent[index] = harmonic.percent;
+            value.harmonic_relative_db[index] = harmonic.relative_db;
+            value.harmonic_count += 1;
+        }
+
+        // SAFETY: `out` is non-null and writable per the contract.
+        unsafe { ptr::write(out, value) };
+        true
+    })
+}
+
 /// Copy the captured device's name into a caller buffer, returning its length.
 ///
 /// # Safety
@@ -991,6 +1131,11 @@ mod tests {
                 0
             );
             assert!(!analyzer_session_reset_average(ptr::null_mut()));
+            assert!(!analyzer_session_distortion(
+                ptr::null_mut(),
+                0.0,
+                ptr::null_mut()
+            ));
             assert!(!analyzer_session_frame_info(
                 ptr::null_mut(),
                 ptr::null_mut()

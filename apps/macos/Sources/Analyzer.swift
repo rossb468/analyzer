@@ -30,6 +30,26 @@ struct FrameInfo {
     let binSpacingHz: Float
 }
 
+/// A harmonic distortion reading.
+struct DistortionReading {
+    let fundamentalHz: Float
+    let thdPercent: Float
+    let thdDb: Float
+    let thdNPercent: Float
+    let noiseFloorDb: Float
+    let ordersAboveNyquist: UInt32
+    let harmonics: [(order: Int, hz: Float, percent: Float, relativeDb: Float)]
+
+    /// Honest about how many orders the figure covers, since a high fundamental
+    /// pushes upper harmonics past Nyquist where they cannot be measured.
+    var summary: String {
+        let orders = ordersAboveNyquist > 0 && !harmonics.isEmpty
+            ? " (to H\(harmonics.count + 1))"
+            : ""
+        return String(format: "THD %.3f%%%@ @ %@", thdPercent, orders, formatFrequency(fundamentalHz))
+    }
+}
+
 /// A gridline.
 struct GridTick {
     let value: Float
@@ -197,6 +217,40 @@ final class AnalyzerSessionHandle {
             averageFrames: raw.average_frames,
             sampleRate: raw.sample_rate,
             binSpacingHz: raw.bin_spacing_hz
+        )
+    }
+
+    /// Measure distortion in the current spectrum.
+    ///
+    /// Returns nil when no fundamental stands clear enough of the noise floor
+    /// for the figure to mean anything, so a UI can hide the readout rather than
+    /// show a number derived from hiss.
+    func distortion(fundamentalHz: Float = 0) -> DistortionReading? {
+        guard let handle else { return nil }
+        var raw = AnalyzerDistortion()
+        guard analyzer_session_distortion(handle, fundamentalHz, &raw) else { return nil }
+
+        var harmonics: [(order: Int, hz: Float, percent: Float, relativeDb: Float)] = []
+        let hz = withUnsafeBytes(of: raw.harmonic_hz) { Array($0.bindMemory(to: Float.self)) }
+        let percent = withUnsafeBytes(of: raw.harmonic_percent) {
+            Array($0.bindMemory(to: Float.self))
+        }
+        let relative = withUnsafeBytes(of: raw.harmonic_relative_db) {
+            Array($0.bindMemory(to: Float.self))
+        }
+        for index in 0..<Int(raw.harmonic_count) where index < hz.count {
+            // Harmonics start at the second order; the fundamental is the first.
+            harmonics.append((index + 2, hz[index], percent[index], relative[index]))
+        }
+
+        return DistortionReading(
+            fundamentalHz: raw.fundamental_hz,
+            thdPercent: raw.thd_percent,
+            thdDb: raw.thd_db,
+            thdNPercent: raw.thd_n_percent,
+            noiseFloorDb: raw.noise_floor_db,
+            ordersAboveNyquist: raw.orders_above_nyquist,
+            harmonics: harmonics
         )
     }
 

@@ -18,6 +18,9 @@ final class AnalyzerModel: ObservableObject {
     @Published var averageFrames: UInt32 = 0
     /// Whether the long-term average trace is drawn.
     @Published var showAverage = true
+    /// Most recent distortion reading, or nil when no tone stands clear of the
+    /// noise floor.
+    @Published var distortion: DistortionReading?
 
     @Published var fftSize: UInt32 = 4096 { didSet { restartIfRunning() } }
     @Published var window: AnalyzerWindow = AnalyzerWindow_Hann { didSet { restartIfRunning() } }
@@ -133,6 +136,7 @@ struct SpectrumView: NSViewRepresentable {
         var model: AnalyzerModel
         var renderer: SpectrumRenderer?
         private var lastColumns = 0
+        private var distortionCountdown = 0
 
         init(model: AnalyzerModel) {
             self.model = model
@@ -176,6 +180,13 @@ struct SpectrumView: NSViewRepresentable {
                         self.model.overruns = info.overruns
                         self.model.framesAveraged = info.framesAveraged
                         self.model.averageFrames = info.averageFrames
+                    }
+                    // Distortion is a per-frame read but is only worth
+                    // recomputing at a rate a human can follow, not at 120 Hz.
+                    self.distortionCountdown -= 1
+                    if self.distortionCountdown <= 0 {
+                        self.distortionCountdown = 30
+                        self.model.distortion = session.distortion()
                     }
                     return trace
                 }
@@ -339,6 +350,18 @@ struct ContentView: View {
                 // wrong rather than merely noisy.
                 Label("\(model.overruns) dropped", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
+            }
+            if let distortion = model.distortion {
+                // Only shown when a tone is actually present; otherwise the
+                // figure would be the distortion of room noise.
+                Text(distortion.summary)
+                    .foregroundStyle(.cyan)
+                    .help(
+                        distortion.harmonics
+                            .prefix(5)
+                            .map { String(format: "H%d %.3f%%", $0.order, $0.percent) }
+                            .joined(separator: "  ")
+                    )
             }
             Spacer()
             Text("0 dBFS = full scale sine")
