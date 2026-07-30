@@ -20,6 +20,8 @@ analyzer-plot = { path = "crates/analyzer-plot" }
 
 # External.
 assert_no_alloc = "1.1"
+core-foundation-sys = "0.8"
+coreaudio-sys = "0.2"
 hound = "3.5"
 realfft = "3.5"
 rtrb = "0.3"

@@ -12,3 +12,7 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = { workspace = true }
+coreaudio-sys = { workspace = true }

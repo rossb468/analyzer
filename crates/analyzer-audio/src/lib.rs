@@ -15,12 +15,16 @@
 //! an Apple crate at all.
 
 pub mod backend;
+#[cfg(target_os = "macos")]
+pub mod coreaudio;
 pub mod device;
 pub mod error;
 pub mod offline;
 pub mod stream;
 
 pub use backend::AudioBackend;
+#[cfg(target_os = "macos")]
+pub use coreaudio::{CoreAudioBackend, CoreAudioStream};
 pub use device::{DeviceId, DeviceInfo};
 pub use error::AudioError;
 pub use offline::{OfflineBackend, OfflineStream, Source};
