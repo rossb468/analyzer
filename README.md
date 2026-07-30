@@ -3,9 +3,10 @@
 A native real-time audio and acoustic measurement tool. Rust core, native UI per
 platform, macOS first.
 
-> **Status: pre-alpha.** The DSP core, audio abstraction and real-time plumbing
-> work and are tested. There is no user interface yet, and no hardware backend —
-> audio currently comes from files or synthesis. `analyzer` is a working name.
+> **Status: pre-alpha.** The DSP core, audio backend and macOS app all build and
+> run. Live capture needs a one-time microphone permission grant that has not
+> been given on the development machine yet, so it is written and unverified
+> against real hardware. `analyzer` is a working name.
 
 ## Why
 
@@ -21,18 +22,43 @@ real-time analyzer at all.
 The gap is a genuinely native, genuinely fast **live** analyzer. That is what this
 starts with.
 
+## What works
+
+| Area | State |
+|---|---|
+| FFT, windows, Welch spectrum | Done, checked against published correction factors |
+| Signal generator | Sine, white, pink, exponential sweep |
+| Transfer function | H1 estimator, magnitude, phase, coherence |
+| Delay finder | GCC-PHAT with sub-sample interpolation |
+| Level meters | Peak, RMS, LEQ; A/C/Z weighting; fast/slow/impulse |
+| Octave bands | IEC 61260, 1/1 through 1/48 |
+| Calibration | dBFS to dB SPL, mic curves, weighting |
+| CoreAudio backend | Enumeration verified; capture pending a permission grant |
+| Engine | Lock-free ring, analysis thread, snapshot publication |
+| macOS app | SwiftUI shell, Metal spectrum renderer |
+| MTW | Not started — the remaining Milestone 1 item |
+
 ## Building
 
-Needs Rust 1.87 or newer.
+Needs Rust 1.87 or newer, and Xcode for the macOS app.
 
 ```bash
-cargo test --workspace
+./check.sh
+```
+
+That runs format, lint and the full test suite as one gate. It exists because
+hand-rolling those three commands in a shell one-liner kept swallowing exit codes.
+
+The macOS app:
+
+```bash
+./apps/macos/build.sh --run
 ```
 
 ## Trying it
 
-The headless harness runs the whole analysis chain from a file or a synthesised
-signal. It needs no hardware.
+The headless harness runs the whole chain from a file or a synthesised signal and
+needs no hardware:
 
 ```bash
 cargo run -p analyzer-cli -- --help
@@ -44,29 +70,53 @@ A half-scale sine on an exact bin centre should read −6.02 dBFS:
 cargo run -p analyzer-cli -- --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak
 ```
 
-Off a bin centre, the window choice starts to matter — which is why there is more
-than one:
+Off a bin centre the window choice starts to matter, which is why there is more
+than one — flat-top loses about 0.002 dB to scalloping where Hann loses 0.63:
 
 ```bash
 for w in hann bh flattop; do cargo run -q -p analyzer-cli -- --sine 1000 --amplitude 0.5 --seconds 1 --window $w --peak | grep -v '^#'; done
 ```
 
-Flat-top loses about 0.002 dB to scalloping where Hann loses 0.63 dB. That is the
-whole reason flat-top exists, and it is why it is the window to calibrate with.
+List audio devices, which works without any permission:
+
+```bash
+cargo run -p analyzer-cli -- --list-devices
+```
+
+## Performance
+
+Measured with `--bench` on an M1 Pro. Duty cycle is CPU seconds per second of
+audio; the target is under 0.5 on one performance core.
+
+| Case | Duty | Realtime factor |
+|---|---|---|
+| Spectrum, 16384-point, 75% overlap | 0.0029 | 341× |
+| Transfer function, 16384-point, two channels | 0.0125 | 80× |
+| Level meter, A-weighted | 0.00068 | 1473× |
+| Octave banding, 1/48, at 120 Hz | 0.00105 | — |
+
+Ring soak over 1125 blocks: **zero overruns**, worst audio callback **0.2 µs**
+against a 2667 µs budget. That last figure is what the deinterleave-and-return
+callback design was for.
+
+```bash
+cargo run --release -p analyzer-cli -- --bench 5
+```
 
 ## Architecture
 
 ```
 crates/
-  analyzer-dsp/       FFT, windows, spectra. No I/O, no platform dependencies.
+  analyzer-dsp/       FFT, windows, spectra, transfer function, delay, meters,
+                      octave bands, generator. No I/O, no platform dependencies.
   analyzer-cal/       Calibration chain: converter samples to absolute dB SPL.
-  analyzer-audio/     AudioBackend trait and platform backends.
-  analyzer-engine/    Lock-free buffering, snapshot publication, allocation trap.
-  analyzer-model/     Session state and the measurement store.
+  analyzer-audio/     AudioBackend trait, CoreAudio backend, offline backend.
+  analyzer-engine/    Lock-free buffering, analysis thread, allocation trap.
+  analyzer-model/     Session state and the measurement store. Not started.
   analyzer-plot/      Display data reduction and axis transforms. Emits no pixels.
   analyzer-ffi/       Stable C ABI for the platform user interfaces.
 apps/macos/           Swift + SwiftUI shell with a Metal renderer.
-tools/analyzer-cli/   Headless harness.
+tools/analyzer-cli/   Headless harness and benchmarks.
 ```
 
 The thread topology is where the performance comes from:
@@ -79,13 +129,13 @@ deinterleave                       no deadline,          newest wins     never
 and return                         must keep up                          blocks
 ```
 
-Three decisions worth knowing about:
+Decisions worth knowing about:
 
 **The audio callback cannot allocate, and that is enforced rather than trusted.**
 Every real-time audio codebase has this rule; most enforce it by code review,
 which means violations ship and surface as a click once an hour on somebody
-else's machine. Here the callback runs inside a guard that aborts the process, and
-CI runs the same guard.
+else's machine. Here the callback runs inside a guard that aborts the process,
+and CI runs the same guard.
 
 **The capture ring is interleaved and writes are all-or-nothing.** With one ring
 per channel a partial write could advance one channel and not another, and
@@ -98,12 +148,24 @@ waterfall is one column of data per frame written into a GPU ring texture.
 Recompositing a full Retina waterfall on the CPU is roughly what REW does, and it
 is why its waterfall is slow.
 
+**Axis mapping lives in Rust and is queried, never reimplemented.** Cursor
+readout, hit-testing and the drawn curve have to agree exactly, and a UI doing
+its own bin-to-pixel arithmetic is how they quietly stop agreeing.
+
 ## Portability
 
 macOS comes first and deep, but the deferral is designed for rather than assumed
 away: no application logic lives in Swift, `AudioBackend` and `Fft` are traits
 with one implementation each, and no Apple SDK type appears outside
 `apps/macos/` and one `cfg(target_os = "macos")` module.
+
+## A note on microphone permission
+
+macOS gates capture behind TCC, and it will not raise a permission prompt for a
+process launched in a non-interactive background session — it refuses outright,
+and CoreAudio then stalls for minutes before failing. Run the app or the CLI once
+from a foreground Terminal window, or grant access under System Settings →
+Privacy & Security → Microphone. Device enumeration works without it.
 
 ## Licence
 
