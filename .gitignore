@@ -12,3 +12,8 @@ Cargo.lock.bak
 xcuserdata/
 *.xcuserstate
 DerivedData/
+
+# macOS app build output
+/apps/macos/build/
+# Generated beside the header at build time
+/crates/analyzer-ffi/include/module.modulemap

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Analyzer</string>
+    <key>CFBundleDisplayName</key>
+    <string>Analyzer</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.rossbower.analyzer</string>
+    <key>CFBundleExecutable</key>
+    <string>Analyzer</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Required. Without it macOS refuses microphone access outright rather
+         than prompting, and capture silently returns digital silence. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Analyzer captures audio from your microphone to measure frequency response.</string>
+</dict>
+</plist>

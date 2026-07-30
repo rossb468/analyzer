@@ -6,7 +6,9 @@ autogen_warning = """
 """
 documentation = true
 documentation_style = "doxy"
-cpp_compat = true
+# Off: with it on, cbindgen emits both `enum X` and `typedef uint32_t X`, and
+# Swift's clang importer sees two candidates for the same name. Swift imports C.
+cpp_compat = false
 
 [export]
 prefix = ""
