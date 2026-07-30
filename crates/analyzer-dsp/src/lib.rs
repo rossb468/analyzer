@@ -14,9 +14,11 @@
 //! eventually surfaces as a dropped block and a silently corrupted measurement.
 
 pub mod fft;
+pub mod spectrum;
 pub mod window;
 
 pub use fft::{Fft, RealFft};
+pub use spectrum::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig};
 pub use window::{Window, WindowKind};
 
 /// Re-exported so callers need not depend on `rustfft` directly to name a bin.
