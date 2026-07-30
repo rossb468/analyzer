@@ -16,11 +16,13 @@
 pub mod fft;
 pub mod generator;
 pub mod spectrum;
+pub mod transfer;
 pub mod window;
 
 pub use fft::{Fft, RealFft};
 pub use generator::{Generator, Signal};
 pub use spectrum::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig};
+pub use transfer::{TransferAveraging, TransferConfig, TransferFunction, unwrap_phase_degrees};
 pub use window::{Window, WindowKind};
 
 /// Re-exported so callers need not depend on `rustfft` directly to name a bin.
