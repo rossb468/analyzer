@@ -31,9 +31,20 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
-      # The allocation trap only proves anything when it actually runs. Once the
-      # offline harness exists this step drives it with assert_no_alloc active,
-      # so an allocation on the audio thread fails the build rather than
-      # surfacing as an intermittent click in the field.
+      # The allocation trap only proves anything when it actually runs. A debug
+      # build registers the tracking allocator, so if the audio callback
+      # allocates the process aborts and this step fails - rather than the
+      # violation shipping and surfacing as an intermittent click in the field.
       - name: Real-time safety harness
-        run: echo "not yet implemented - see analyzer-engine"
+        run: cargo run -p analyzer-cli -- --sine 1000 --seconds 1 --window flattop --peak
+
+      # A known-answer check on the whole chain: an on-bin sine at half scale
+      # must read -6.02 dBFS. Catches an FFT scaling, window correction or dBFS
+      # reference error that unit tests could all individually pass through.
+      - name: Known-answer level check
+        run: |
+          level=$(cargo run -q -p analyzer-cli -- \
+            --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak \
+            | grep -v '^#' | cut -f2)
+          echo "measured: $level dBFS (expected -6.0206)"
+          awk -v got="$level" 'BEGIN { exit (got - -6.0206 < 0.02 && got - -6.0206 > -0.02) ? 0 : 1 }'
