@@ -14,8 +14,10 @@
 //! eventually surfaces as a dropped block and a silently corrupted measurement.
 
 pub mod fft;
+pub mod window;
 
 pub use fft::{Fft, RealFft};
+pub use window::{Window, WindowKind};
 
 /// Re-exported so callers need not depend on `rustfft` directly to name a bin.
 pub use rustfft::num_complex::Complex32;
