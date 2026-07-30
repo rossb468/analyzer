@@ -26,17 +26,20 @@ starts with.
 
 | Area | State |
 |---|---|
-| FFT, windows, Welch spectrum | Done, checked against published correction factors |
+| FFT, windows, Welch spectrum | Checked against published correction factors |
 | Signal generator | Sine, white, pink, exponential sweep |
-| Transfer function | H1 estimator, magnitude, phase, coherence |
+| Transfer function | H1 estimator: magnitude, phase, coherence |
+| Multi-time-window | Several FFT sizes spliced onto a log grid |
 | Delay finder | GCC-PHAT with sub-sample interpolation |
 | Level meters | Peak, RMS, LEQ; A/C/Z weighting; fast/slow/impulse |
 | Octave bands | IEC 61260, 1/1 through 1/48 |
 | Calibration | dBFS to dB SPL, mic curves, weighting |
+| Sweep deconvolution | Regularised, recovering an impulse response |
+| Impulse analysis | Gating, gated response, Schroeder decay, EDT/T20/T30 |
+| Measurement model | Types, store, versioned file format, REW text export |
 | CoreAudio backend | Enumeration verified; capture pending a permission grant |
 | Engine | Lock-free ring, analysis thread, snapshot publication |
-| macOS app | SwiftUI shell, Metal spectrum renderer |
-| MTW | Not started — the remaining Milestone 1 item |
+| macOS app | SwiftUI shell, Metal spectrum renderer (RTA only so far) |
 
 ## Building
 
@@ -83,6 +86,20 @@ List audio devices, which works without any permission:
 cargo run -p analyzer-cli -- --list-devices
 ```
 
+Measure a synthetic room end to end — sweep, convolve, deconvolve, and report
+arrival, reflections, reverberation time and gated response, with the
+constructed truth printed alongside:
+
+```bash
+cargo run --release -p analyzer-cli -- --measure-demo
+```
+
+Or deconvolve a real pair of recordings:
+
+```bash
+cargo run --release -p analyzer-cli -- --measure stimulus.wav response.wav
+```
+
 ## Performance
 
 Measured with `--bench` on an M1 Pro. Duty cycle is CPU seconds per second of
@@ -107,12 +124,13 @@ cargo run --release -p analyzer-cli -- --bench 5
 
 ```
 crates/
-  analyzer-dsp/       FFT, windows, spectra, transfer function, delay, meters,
-                      octave bands, generator. No I/O, no platform dependencies.
+  analyzer-dsp/       FFT, windows, spectra, transfer function, MTW, delay,
+                      meters, octave bands, generator, deconvolution, impulse
+                      analysis. No I/O, no platform dependencies.
   analyzer-cal/       Calibration chain: converter samples to absolute dB SPL.
   analyzer-audio/     AudioBackend trait, CoreAudio backend, offline backend.
   analyzer-engine/    Lock-free buffering, analysis thread, allocation trap.
-  analyzer-model/     Session state and the measurement store. Not started.
+  analyzer-model/     Measurements, store, file format, REW text export.
   analyzer-plot/      Display data reduction and axis transforms. Emits no pixels.
   analyzer-ffi/       Stable C ABI for the platform user interfaces.
 apps/macos/           Swift + SwiftUI shell with a Metal renderer.
@@ -151,6 +169,12 @@ is why its waterfall is slow.
 **Axis mapping lives in Rust and is queried, never reimplemented.** Cursor
 readout, hit-testing and the drawn curve have to agree exactly, and a UI doing
 its own bin-to-pixel arithmetic is how they quietly stop agreeing.
+
+**Measurements are stored unsmoothed, complex, in f64, with their absolute
+references attached.** Smoothing is a view transform; storing a smoothed
+magnitude curve forecloses group delay, RT60 and minimum-phase decomposition
+forever. An unknown SPL offset stays `None` rather than becoming zero, because
+"not measured" and "measured as needing no correction" are different facts.
 
 ## Portability
 

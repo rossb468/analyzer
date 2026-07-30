@@ -368,3 +368,66 @@ fn analyses_a_wav_file_from_disk() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// The swept-measurement path through the CLI, not just the module behind it.
+#[test]
+fn measure_demo_runs_end_to_end() {
+    let output = run(&["--measure-demo"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("# constructed:"));
+    assert!(stdout.contains("# measured:"));
+    assert!(stdout.contains("direct arrival"));
+    assert!(stdout.contains("T30"));
+    assert!(stdout.contains("gated response"));
+}
+
+/// The gate flag has to reach the measurement, not just parse.
+#[test]
+fn the_gate_flag_changes_the_reported_limit() {
+    let limit = |ms: &str| -> f32 {
+        let output = run(&["--measure-demo", "--gate", ms]);
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.contains("valid above"))
+            .and_then(|line| line.split_whitespace().rev().nth(1)?.parse().ok())
+            .unwrap_or(f32::NAN)
+    };
+    assert!(
+        limit("40") < limit("5"),
+        "a wider gate should reach lower in frequency"
+    );
+}
+
+#[test]
+fn measure_needs_two_paths() {
+    let output = run(&["--measure", "only-one.wav"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("needs a value"));
+}
+
+#[test]
+fn measure_reports_a_missing_file_cleanly() {
+    let output = run(&["--measure", "nope-a.wav", "nope-b.wav"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("opening"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"));
+}
+
+#[test]
+fn bench_runs_and_reports_every_stage() {
+    let output = run(&["--bench", "0.2"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("spectrum analysis"));
+    assert!(stdout.contains("transfer function"));
+    assert!(stdout.contains("ring soak"));
+    assert!(stdout.contains("overruns:"));
+}
