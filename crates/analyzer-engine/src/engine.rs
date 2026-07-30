@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use analyzer_dsp::{SpectrumAnalyzer, SpectrumConfig};
+use analyzer_dsp::{Averaging, SpectrumAnalyzer, SpectrumConfig};
 
 use crate::ring::{CaptureSink, CaptureSource, capture_ring};
 use crate::snapshot::{SnapshotReader, snapshot_channel};
@@ -55,7 +55,22 @@ pub struct SpectrumFrame {
     /// genuinely new frame, and makes a torn read detectable in tests.
     pub sequence: u64,
     /// Level per bin in dBFS, 0 dBFS being a full-scale sine.
+    ///
+    /// The live trace: whatever averaging the user asked for, usually short so
+    /// it tracks what is happening now.
     pub bins: Vec<f32>,
+    /// The same spectrum under long-term averaging, accumulated independently.
+    ///
+    /// A separate analyzer rather than a smoothed copy of `bins`. Smoothing the
+    /// already-averaged live trace would compound two time constants and give a
+    /// curve that is neither responsive nor statistically better; two analyzers
+    /// over the same samples give a genuinely lower-variance estimate while the
+    /// live trace stays fast.
+    pub average_bins: Vec<f32>,
+    /// Frames folded into the long-term average, which is what makes it
+    /// trustworthy. Reported so a UI can show progress rather than an
+    /// indistinguishable curve.
+    pub average_frames: u32,
     /// Hertz between adjacent bins.
     pub bin_spacing_hz: f32,
     /// Rate the analysis ran at.
@@ -83,6 +98,9 @@ pub struct EngineConfig {
     pub analysis_channel: usize,
     /// Spectrum settings, including sample rate and FFT size.
     pub spectrum: SpectrumConfig,
+    /// Averaging for the long-term trace. Everything else is taken from
+    /// `spectrum`, so the two analyzers differ only in how they average.
+    pub average: Averaging,
     /// Ring capacity. Sized by worst-case scheduling latency, not throughput —
     /// 8192 frames is roughly 170 ms of runway at 48 kHz.
     pub ring_capacity_frames: usize,
@@ -98,6 +116,7 @@ impl EngineConfig {
                 sample_rate,
                 ..SpectrumConfig::default()
             },
+            average: Averaging::Infinite,
             ring_capacity_frames: 8192,
         }
     }
@@ -112,6 +131,7 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     reader: SnapshotReader<SpectrumFrame>,
     published: Arc<AtomicU64>,
+    reset_average: Arc<AtomicBool>,
     config: EngineConfig,
 }
 
@@ -138,9 +158,17 @@ impl Engine {
         let (sink, source) = capture_ring(config.channels, config.ring_capacity_frames);
 
         let analyzer = SpectrumAnalyzer::new(config.spectrum);
+        // Same transform, different averaging. Sharing the configuration is what
+        // keeps the two traces directly comparable.
+        let average = SpectrumAnalyzer::new(SpectrumConfig {
+            averaging: config.average,
+            ..config.spectrum
+        });
         let initial = SpectrumFrame {
             sequence: 0,
             bins: vec![analyzer_dsp::spectrum::DB_FLOOR; analyzer.bins()],
+            average_bins: vec![analyzer_dsp::spectrum::DB_FLOOR; analyzer.bins()],
+            average_frames: 0,
             bin_spacing_hz: analyzer.bin_spacing_hz(),
             sample_rate: config.spectrum.sample_rate,
             frames_averaged: 0,
@@ -150,10 +178,14 @@ impl Engine {
 
         let stop = Arc::new(AtomicBool::new(false));
         let published = Arc::new(AtomicU64::new(0));
+        // A flag rather than a channel: the worker checks it once per iteration,
+        // and a missed reset would be indistinguishable from a late one.
+        let reset_average = Arc::new(AtomicBool::new(false));
 
         let worker = {
             let stop = Arc::clone(&stop);
             let published = Arc::clone(&published);
+            let reset_average = Arc::clone(&reset_average);
             let channel = config.analysis_channel;
             let channels = config.channels;
             thread::Builder::new()
@@ -162,9 +194,11 @@ impl Engine {
                     Worker {
                         source,
                         analyzer,
+                        average,
                         publisher,
                         stop,
                         published,
+                        reset_average,
                         channel,
                         channels,
                         interleaved: vec![0.0; DRAIN_FRAMES * channels],
@@ -182,6 +216,7 @@ impl Engine {
                 stop,
                 reader,
                 published,
+                reset_average,
                 config,
             },
         )
@@ -205,6 +240,14 @@ impl Engine {
     /// snapshot. Useful for tests and for a throughput readout.
     pub fn published_count(&self) -> u64 {
         self.published.load(Ordering::Relaxed)
+    }
+
+    /// Restart the long-term average without disturbing the live trace.
+    ///
+    /// Takes effect on the worker's next pass, so a caller should not expect the
+    /// very next frame to show a cleared average.
+    pub fn reset_average(&self) {
+        self.reset_average.store(true, Ordering::Relaxed);
     }
 
     /// The configuration in force.
@@ -232,9 +275,11 @@ impl Drop for Engine {
 struct Worker {
     source: CaptureSource,
     analyzer: SpectrumAnalyzer,
+    average: SpectrumAnalyzer,
     publisher: crate::snapshot::SnapshotPublisher<SpectrumFrame>,
     stop: Arc<AtomicBool>,
     published: Arc<AtomicU64>,
+    reset_average: Arc<AtomicBool>,
     channel: usize,
     channels: usize,
     interleaved: Vec<f32>,
@@ -246,6 +291,10 @@ impl Worker {
         let mut sequence = 0_u64;
 
         while !self.stop.load(Ordering::Relaxed) {
+            if self.reset_average.swap(false, Ordering::Relaxed) {
+                self.average.reset();
+            }
+
             // Exactly one bounded pass per iteration. See DRAIN_FRAMES: looping
             // until the ring is empty lets a fast producer starve publication.
             let frames = self.source.read_interleaved(&mut self.interleaved);
@@ -264,11 +313,16 @@ impl Worker {
                     .copied()
                     .unwrap_or_default();
             }
-            let produced = self.analyzer.push(self.mono.get(..frames).unwrap_or(&[]));
+            let mono = self.mono.get(..frames).unwrap_or(&[]);
+            let produced = self.analyzer.push(mono);
+            // Both see the same samples, so the two traces describe the same
+            // audio and any difference between them is averaging alone.
+            self.average.push(mono);
 
             if produced > 0 {
                 sequence += 1;
                 let analyzer = &self.analyzer;
+                let average = &self.average;
                 let overruns = self.source.overruns();
                 self.publisher.publish_with(|frame| {
                     // The pending buffer is recycled and holds a value from two
@@ -276,6 +330,9 @@ impl Worker {
                     frame.sequence = sequence;
                     frame.bins.resize(analyzer.bins(), 0.0);
                     analyzer.write_db_fs(&mut frame.bins);
+                    frame.average_bins.resize(average.bins(), 0.0);
+                    average.write_db_fs(&mut frame.average_bins);
+                    frame.average_frames = average.frames();
                     frame.bin_spacing_hz = analyzer.bin_spacing_hz();
                     frame.sample_rate = analyzer.bin_spacing_hz() * analyzer.size() as f32;
                     frame.frames_averaged = analyzer.frames();
@@ -311,6 +368,7 @@ mod tests {
                 overlap: Overlap::None,
                 averaging: Averaging::Infinite,
             },
+            average: Averaging::Infinite,
             ring_capacity_frames: 16_384,
         }
     }
@@ -399,6 +457,70 @@ mod tests {
             engine.latest().bins[85] < -80.0,
             "silent channel picked up the tone: {}",
             engine.latest().bins[85]
+        );
+    }
+
+    /// Both traces must describe the same audio, differing only in how they
+    /// average. A steady tone settles to the same answer either way.
+    #[test]
+    fn the_average_trace_tracks_the_same_signal() {
+        let (mut sink, mut engine) = Engine::start(config(1, 0));
+        let samples = tone(SIZE * 8, 1, 0, 0.5);
+        feed_until_published(&mut sink, &engine, &samples, 256);
+
+        // Give the average a few frames to settle.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while engine.published_count() < 4 && Instant::now() < deadline {
+            let _ = sink.write_interleaved(&samples[..256.min(samples.len())]);
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let frame = engine.latest().clone();
+        assert_eq!(
+            frame.average_bins.len(),
+            frame.bins.len(),
+            "both traces span the same bins"
+        );
+        assert!(frame.average_frames > 0, "the average should have run");
+        assert!(
+            (frame.average_bins[85] - frame.bins[85]).abs() < 1.0,
+            "on a steady tone they should agree: live {} vs average {}",
+            frame.bins[85],
+            frame.average_bins[85]
+        );
+    }
+
+    /// Resetting the average must not disturb the live trace, which is the whole
+    /// point of running two analyzers.
+    #[test]
+    fn resetting_the_average_leaves_the_live_trace_alone() {
+        let (mut sink, mut engine) = Engine::start(config(1, 0));
+        let samples = tone(SIZE * 4, 1, 0, 0.5);
+        feed_until_published(&mut sink, &engine, &samples, 256);
+
+        let before = engine.latest().clone();
+        assert!(before.average_frames > 0);
+
+        engine.reset_average();
+
+        // Feed enough for the worker to see the flag and publish again.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let target = engine.published_count() + 2;
+        while engine.published_count() < target && Instant::now() < deadline {
+            let _ = sink.write_interleaved(&samples[..256.min(samples.len())]);
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let after = engine.latest().clone();
+        assert!(
+            after.average_frames < before.average_frames + 2,
+            "the average should have restarted: {} then {}",
+            before.average_frames,
+            after.average_frames
+        );
+        assert!(
+            (after.bins[85] - before.bins[85]).abs() < 1.0,
+            "the live trace must be undisturbed"
         );
     }
 

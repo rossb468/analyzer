@@ -123,6 +123,7 @@ mod tests {
             sample_rate: 48_000.0,
             frames_averaged: 12,
             overruns: 0,
+            ..SpectrumFrame::default()
         }
     }
 

@@ -167,6 +167,9 @@ fn capture_inner(options: &LiveOptions) -> Result<SpectrumFrame, String> {
         channels,
         analysis_channel: options.channel,
         spectrum,
+        // The CLI prints one settled figure rather than a live curve, so the
+        // long-term trace is not used here; it still has to be configured.
+        average: analyzer_dsp::Averaging::Infinite,
         ring_capacity_frames: 16_384,
     });
 

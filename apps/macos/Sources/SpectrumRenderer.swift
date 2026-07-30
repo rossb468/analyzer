@@ -71,6 +71,7 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
     /// Shared-storage buffers, written by the CPU and read by the GPU without a
     /// blit. Grown only when the drawable does.
     private var traceBuffer: MTLBuffer?
+    private var averageBuffer: MTLBuffer?
     private var gridBuffer: MTLBuffer?
     private var gridVertexCount = 0
 
@@ -78,6 +79,8 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
 
     /// Set by the view before each draw.
     var traceProvider: ((Int) -> ArraySlice<Float>)?
+    /// Long-term average, drawn under the live trace. Nil hides it.
+    var averageProvider: ((Int) -> ArraySlice<Float>)?
     var gridProvider: (() -> [SIMD2<Float>])?
     var levelRange: (min: Float, max: Float) = (-120, 0)
     var onResize: ((CGSize) -> Void)?
@@ -136,6 +139,23 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
             encoder.setVertexBuffer(gridBuffer, offset: 0, index: 0)
             encoder.setFragmentBytes(&colour, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
+        }
+
+        // The average is drawn first so the live trace sits on top of it - the
+        // live one is what the user is watching move.
+        if let levels = averageProvider?(columns), !levels.isEmpty {
+            upload(Array(levels), into: &averageBuffer)
+            var average = uniforms
+            average.count = Float(levels.count)
+            average.minDb = levelRange.min
+            average.maxDb = levelRange.max
+            average.colour = SIMD4<Float>(1.0, 0.65, 0.25, 0.9)
+
+            encoder.setRenderPipelineState(tracePipeline)
+            encoder.setVertexBuffer(averageBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&average, length: MemoryLayout<Uniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&average, length: MemoryLayout<Uniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: levels.count)
         }
 
         if let levels = traceProvider?(columns), !levels.isEmpty {

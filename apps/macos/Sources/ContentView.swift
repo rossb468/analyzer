@@ -15,6 +15,9 @@ final class AnalyzerModel: ObservableObject {
     @Published var deviceName = ""
     @Published var overruns: UInt64 = 0
     @Published var framesAveraged: UInt32 = 0
+    @Published var averageFrames: UInt32 = 0
+    /// Whether the long-term average trace is drawn.
+    @Published var showAverage = true
 
     @Published var fftSize: UInt32 = 4096 { didSet { restartIfRunning() } }
     @Published var window: AnalyzerWindow = AnalyzerWindow_Hann { didSet { restartIfRunning() } }
@@ -172,8 +175,19 @@ struct SpectrumView: NSViewRepresentable {
                     if let info = session.frameInfo {
                         self.model.overruns = info.overruns
                         self.model.framesAveraged = info.framesAveraged
+                        self.model.averageFrames = info.averageFrames
                     }
                     return trace
+                }
+            }
+
+            renderer.averageProvider = { [weak self] columns in
+                guard let self else { return [][...] }
+                return MainActor.assumeIsolated {
+                    guard self.model.showAverage, let session = self.model.session else {
+                        return [][...]
+                    }
+                    return session.copyAverage(columns: columns)
                 }
             }
 
@@ -265,6 +279,11 @@ struct ContentView: View {
 
             Spacer()
 
+            Toggle("Average", isOn: $model.showAverage)
+                .toggleStyle(.checkbox)
+            Button("Reset avg") { model.session?.resetAverage() }
+                .disabled(!model.isRunning)
+
             Button(model.isRunning ? "Stop" : "Start") {
                 model.isRunning ? model.stop() : model.start()
             }
@@ -309,6 +328,12 @@ struct ContentView: View {
         HStack(spacing: 16) {
             Text(model.deviceName.isEmpty ? "not capturing" : model.deviceName)
             Text("\(model.framesAveraged) frames")
+            if model.showAverage {
+                // The average is only as good as the count behind it, so the
+                // count is shown rather than left to be assumed.
+                Text("avg \(model.averageFrames)")
+                    .foregroundStyle(.orange)
+            }
             if model.overruns > 0 {
                 // Never hidden. A spectrum computed across dropped audio is
                 // wrong rather than merely noisy.

@@ -311,6 +311,7 @@ fn analyse_offline(source: Source, args: &Args) -> Result<String, String> {
         sample_rate: rate as f32,
         frames_averaged: analyzer.frames(),
         overruns,
+        ..SpectrumFrame::default()
     };
 
     Ok(report::render(

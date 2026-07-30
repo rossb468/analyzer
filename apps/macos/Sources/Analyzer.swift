@@ -25,6 +25,7 @@ struct FrameInfo {
     let sequence: UInt64
     let overruns: UInt64
     let framesAveraged: UInt32
+    let averageFrames: UInt32
     let sampleRate: Float
     let binSpacingHz: Float
 }
@@ -83,6 +84,7 @@ final class AnalyzerSessionHandle {
     /// Scratch the trace is copied into. Reused so a redraw at 120 Hz does not
     /// allocate; grown only when the drawable gets wider.
     private var traceStorage: [Float] = []
+    private var averageStorage: [Float] = []
 
     /// Start capturing.
     ///
@@ -162,6 +164,28 @@ final class AnalyzerSessionHandle {
         return traceStorage[0..<written]
     }
 
+    /// Copy the long-term average trace.
+    ///
+    /// Separate storage from the live trace so a renderer can hold both at once
+    /// without one overwriting the other mid-frame.
+    func copyAverage(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if averageStorage.count < columns {
+            averageStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = averageStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_average(handle, base, UInt(columns)))
+        }
+        return averageStorage[0..<written]
+    }
+
+    /// Restart the long-term average without disturbing the live trace.
+    func resetAverage() {
+        guard let handle else { return }
+        _ = analyzer_session_reset_average(handle)
+    }
+
     var frameInfo: FrameInfo? {
         guard let handle else { return nil }
         var raw = AnalyzerFrameInfo()
@@ -170,6 +194,7 @@ final class AnalyzerSessionHandle {
             sequence: raw.sequence,
             overruns: raw.overruns,
             framesAveraged: raw.frames_averaged,
+            averageFrames: raw.average_frames,
             sampleRate: raw.sample_rate,
             binSpacingHz: raw.bin_spacing_hz
         )

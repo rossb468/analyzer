@@ -374,6 +374,10 @@ pub struct AnalyzerFrameInfo {
     pub overruns: u64,
     /// Frames folded into the current average.
     pub frames_averaged: u32,
+    /// Frames folded into the long-term average trace, which is what makes it
+    /// trustworthy. A UI can report this rather than presenting a curve built
+    /// from three frames as though it were settled.
+    pub average_frames: u32,
     /// Rate the analysis ran at.
     pub sample_rate: f32,
     /// Hertz between adjacent bins.
@@ -408,6 +412,7 @@ pub struct AnalyzerSession {
     reduction: Reduction,
     columns: usize,
     trace: Trace,
+    average_trace: Trace,
     bins: Vec<f32>,
     device_name: String,
 }
@@ -527,6 +532,9 @@ fn start_session(
             overlap: config.overlap.into(),
             averaging,
         },
+        // The long-term trace always averages everything since its last reset.
+        // Anything shorter would just be a second live trace.
+        average: Averaging::Infinite,
         ring_capacity_frames: 16_384,
     });
 
@@ -564,6 +572,7 @@ fn start_session(
         reduction: Reduction::Max,
         columns: 1000,
         trace: Trace::default(),
+        average_trace: Trace::default(),
         bins: Vec::new(),
         device_name: device.name,
     })
@@ -671,31 +680,105 @@ pub unsafe extern "C" fn analyzer_session_copy_trace(
     }
     guard(0, || {
         let session = unsafe { &mut *session };
-        let columns = session.columns.min(capacity);
-
-        // Copy the bins out before reducing: `latest` borrows the engine, and
-        // the reduction needs a mutable borrow of the session's scratch trace.
-        {
-            let frame = session.engine.latest();
-            session.bins.clear();
-            session.bins.extend_from_slice(&frame.bins);
-        }
-        let spacing = session.engine.latest().bin_spacing_hz;
-
-        reduce(
-            &session.bins,
-            spacing,
-            &session.frequency,
-            columns,
-            session.reduction,
-            &mut session.trace,
-        );
-
-        let written = session.trace.points.len().min(capacity);
-        // SAFETY: `out` holds `capacity` floats and `written <= capacity`.
-        unsafe { ptr::copy_nonoverlapping(session.trace.points.as_ptr(), out, written) };
-        written
+        // SAFETY: caller guarantees `capacity` writable floats.
+        unsafe { copy_reduced(session, out, capacity, Which::Live) }
     })
+}
+
+/// Which of the two traces a copy refers to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Live,
+    Average,
+}
+
+/// Copy the long-term average trace, one value per pixel column.
+///
+/// Uses the same geometry and reduction as [`analyzer_session_copy_trace`], so
+/// the two curves overlay exactly rather than being subtly offset from each
+/// other.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or point to at least
+/// `capacity` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_average(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        // SAFETY: caller guarantees `capacity` writable floats.
+        unsafe { copy_reduced(session, out, capacity, Which::Average) }
+    })
+}
+
+/// Restart the long-term average, leaving the live trace running.
+///
+/// Takes effect on the analysis thread's next pass, so the very next frame may
+/// still show the old average.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_reset_average(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { (*session).engine.reset_average() };
+        true
+    })
+}
+
+/// Shared body of the two copy calls.
+///
+/// # Safety
+///
+/// `out` must point to at least `capacity` writable floats.
+unsafe fn copy_reduced(
+    session: &mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+    which: Which,
+) -> usize {
+    let columns = session.columns.min(capacity);
+
+    // Copy the bins out before reducing: `latest` borrows the engine, and the
+    // reduction needs a mutable borrow of the session's scratch trace.
+    let spacing = {
+        let frame = session.engine.latest();
+        session.bins.clear();
+        session.bins.extend_from_slice(match which {
+            Which::Live => &frame.bins,
+            Which::Average => &frame.average_bins,
+        });
+        frame.bin_spacing_hz
+    };
+
+    let target = match which {
+        Which::Live => &mut session.trace,
+        Which::Average => &mut session.average_trace,
+    };
+    reduce(
+        &session.bins,
+        spacing,
+        &session.frequency,
+        columns,
+        session.reduction,
+        target,
+    );
+
+    let written = target.points.len().min(capacity);
+    // SAFETY: caller guarantees `capacity` writable floats, and written <= capacity.
+    unsafe { ptr::copy_nonoverlapping(target.points.as_ptr(), out, written) };
+    written
 }
 
 /// Read metadata about the newest frame.
@@ -719,6 +802,7 @@ pub unsafe extern "C" fn analyzer_session_frame_info(
                 sequence: frame.sequence,
                 overruns: frame.overruns,
                 frames_averaged: frame.frames_averaged,
+                average_frames: frame.average_frames,
                 sample_rate: frame.sample_rate,
                 bin_spacing_hz: frame.bin_spacing_hz,
             },
@@ -902,6 +986,11 @@ mod tests {
                 analyzer_session_copy_trace(ptr::null_mut(), ptr::null_mut(), 0),
                 0
             );
+            assert_eq!(
+                analyzer_session_copy_average(ptr::null_mut(), ptr::null_mut(), 0),
+                0
+            );
+            assert!(!analyzer_session_reset_average(ptr::null_mut()));
             assert!(!analyzer_session_frame_info(
                 ptr::null_mut(),
                 ptr::null_mut()
