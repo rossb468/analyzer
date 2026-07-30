@@ -64,7 +64,16 @@ fn spectrum_duty(out: &mut String, seconds: f64) {
     let total = (RATE as f64 * seconds) as usize;
     let signal = audio(total, 1);
 
-    for size in [1024_usize, 2048, 4096, 8192, 16_384] {
+    for size in [1024_usize, 4096, 16_384, 32_768, 65_536, 131_072] {
+        // A duty cycle measured over two or three frames says nothing. At
+        // 131072 points and 75% overlap the hop alone is 0.68 s, so a short run
+        // reports a flatteringly low figure simply because almost no work
+        // happened. Skip loudly rather than printing a number that looks like a
+        // result.
+        if let Some(note) = too_short(size, Overlap::ThreeQuarters, seconds) {
+            let _ = writeln!(out, "  {size:>7}  {note}");
+            continue;
+        }
         let mut analyzer = SpectrumAnalyzer::new(SpectrumConfig {
             sample_rate: RATE,
             size,
@@ -115,7 +124,11 @@ fn transfer_duty(out: &mut String, seconds: f64) {
     let reference = audio(total, 2);
     let measurement = audio(total, 3);
 
-    for size in [2048_usize, 4096, 8192, 16_384] {
+    for size in [4096_usize, 16_384, 32_768, 65_536] {
+        if let Some(note) = too_short(size, Overlap::ThreeQuarters, seconds) {
+            let _ = writeln!(out, "  {size:>7}  {note}");
+            continue;
+        }
         let mut tf = TransferFunction::new(TransferConfig {
             sample_rate: RATE,
             size,
@@ -265,6 +278,25 @@ fn ring_soak(out: &mut String, seconds: f64) {
         "  verdict:         {}",
         if sink.overruns() == 0 { "PASS" } else { "FAIL" }
     );
+}
+
+/// Whether this run is too short for the size to mean anything.
+///
+/// Wants at least this many completed frames before a duty cycle is worth
+/// printing.
+const MINIMUM_FRAMES: f64 = 8.0;
+
+fn too_short(size: usize, overlap: Overlap, seconds: f64) -> Option<String> {
+    let hop = overlap.hop(size) as f64;
+    let frames = (f64::from(RATE) * seconds) / hop;
+    if frames >= MINIMUM_FRAMES {
+        return None;
+    }
+    let needed = MINIMUM_FRAMES * hop / f64::from(RATE);
+    Some(format!(
+        "skipped - only {frames:.1} frames in {seconds:.1} s; needs --bench {:.0}",
+        needed.ceil()
+    ))
 }
 
 fn verdict(duty: f64) -> &'static str {

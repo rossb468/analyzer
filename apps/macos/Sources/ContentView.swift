@@ -20,12 +20,35 @@ final class AnalyzerModel: ObservableObject {
     @Published var window: AnalyzerWindow = AnalyzerWindow_Hann { didSet { restartIfRunning() } }
     @Published var averaging: AnalyzerAveraging = AnalyzerAveraging_Fast { didSet { restartIfRunning() } }
 
+    /// Selectable transform sizes.
+    ///
+    /// The upper end is genuinely useful for room work - a room mode is a few
+    /// hertz wide and 4096 points cannot resolve one - but it is slow to settle,
+    /// so the picker shows the time cost alongside.
+    static let fftSizes: [UInt32] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131_072]
+
     let minHz: Float = 20
     let maxHz: Float = 20_000
     let minDb: Float = -120
     let maxDb: Float = 0
 
     private(set) var session: AnalyzerSessionHandle?
+
+    /// Rate the current session runs at, for labelling.
+    private var displayRate: Double {
+        devices.first { $0.uid == selectedDeviceUID }?.sampleRate ?? 48_000
+    }
+
+    /// "16384 · 341 ms · 2.9 Hz" - point count, frame length, bin spacing.
+    func fftLabel(_ size: UInt32) -> String {
+        let rate = displayRate
+        let seconds = Double(size) / rate
+        let spacing = rate / Double(size)
+        let time = seconds >= 1.0
+            ? String(format: "%.1f s", seconds)
+            : String(format: "%.0f ms", seconds * 1000)
+        return "\(size) · \(time) · \(String(format: "%.2g", spacing)) Hz"
+    }
 
     func refreshDevices() {
         devices = availableInputDevices()
@@ -213,12 +236,16 @@ struct ContentView: View {
             }
             .frame(maxWidth: 260)
 
+            // Labelled with the time each frame spans, because that is the
+            // cost being paid: 131072 points buys 0.37 Hz resolution and 2.7
+            // seconds of latency, and a picker showing only the point count
+            // hides half the trade.
             Picker("FFT", selection: $model.fftSize) {
-                ForEach([1024, 2048, 4096, 8192, 16384], id: \.self) { size in
-                    Text("\(size)").tag(UInt32(size))
+                ForEach(AnalyzerModel.fftSizes, id: \.self) { size in
+                    Text(model.fftLabel(size)).tag(size)
                 }
             }
-            .frame(width: 130)
+            .frame(width: 190)
 
             Picker("Window", selection: $model.window) {
                 Text("Hann").tag(AnalyzerWindow_Hann)

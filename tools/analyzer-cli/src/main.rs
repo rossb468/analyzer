@@ -22,14 +22,14 @@ use std::process::ExitCode;
 
 use analyzer_audio::{AudioBuffers, DeviceId, OfflineBackend, Source, StreamConfig};
 use analyzer_dsp::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig, WindowKind};
-use analyzer_engine::{AllocTrap, SpectrumFrame, capture_ring, rt_section};
+use analyzer_engine::{SpectrumFrame, capture_ring, rt_section};
 
 /// The allocation trap is inert unless a binary registers it. Doing so here is
 /// what makes the guard around every audio callback mean anything: if one ever
 /// allocates, this process dies instead of quietly glitching.
 #[cfg(debug_assertions)]
 #[global_allocator]
-static ALLOC_TRAP: AllocTrap = AllocTrap;
+static ALLOC_TRAP: analyzer_engine::AllocTrap = analyzer_engine::AllocTrap;
 
 const USAGE: &str = "\
 analyzer-cli - headless spectrum analysis harness
