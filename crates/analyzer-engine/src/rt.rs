@@ -26,7 +26,18 @@
 //! every binary in this workspace registers it.
 
 /// The tracking allocator. Register it with `#[global_allocator]` in a binary.
+///
+/// In release builds `assert_no_alloc` compiles its allocator away entirely -
+/// that is the point, the guard costs nothing in shipped code - so this becomes
+/// the system allocator under the same name. Binaries can therefore register it
+/// unconditionally without a `cfg` of their own, and a release build that forgot
+/// one still links.
+#[cfg(debug_assertions)]
 pub use assert_no_alloc::AllocDisabler as AllocTrap;
+
+/// The system allocator, standing in for the trap in release builds.
+#[cfg(not(debug_assertions))]
+pub use std::alloc::System as AllocTrap;
 
 /// Run `f` with allocation forbidden.
 ///

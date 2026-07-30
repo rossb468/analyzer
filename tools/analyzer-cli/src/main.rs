@@ -10,6 +10,7 @@
 //! Offline analysis is deliberately single-threaded and reproducible; live
 //! capture runs the real threaded engine against real hardware.
 
+mod bench;
 mod live;
 mod report;
 
@@ -43,6 +44,7 @@ INPUT:
     --sine <hz>          Synthesise a sine instead of reading a file
     --live [seconds]     Capture from hardware (default 5 seconds)
     --list-devices       Show every audio device and exit
+    --bench [seconds]    Measure analysis throughput and ring behaviour (default 2)
 
 ANALYSIS:
     --fft <n>            FFT size, even (default 4096)
@@ -123,6 +125,9 @@ enum Input {
         seconds: f64,
     },
     ListDevices,
+    Bench {
+        seconds: f64,
+    },
 }
 
 fn run() -> Result<(), String> {
@@ -133,6 +138,7 @@ fn run() -> Result<(), String> {
 
     let report = match &args.input {
         Input::ListDevices => live::list_devices()?,
+        Input::Bench { seconds } => bench::run(*seconds),
         Input::Live { device, seconds } => {
             let options = live::LiveOptions {
                 device: device.clone(),
@@ -318,8 +324,8 @@ fn load_source(args: &Args) -> Result<Source, String> {
                 .collect();
             Ok(Source::mono(samples, *rate))
         }
-        Input::Live { .. } | Input::ListDevices => {
-            Err("live capture does not load a source".into())
+        Input::Live { .. } | Input::ListDevices | Input::Bench { .. } => {
+            Err("this mode does not load a source".into())
         }
     }
 }
@@ -377,6 +383,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut sine_hz: Option<f64> = None;
     let mut live_seconds: Option<f64> = None;
     let mut list_devices = false;
+    let mut bench_seconds: Option<f64> = None;
     let mut device: Option<String> = None;
     let mut fft = 4096_usize;
     let mut window = WindowKind::Hann;
@@ -406,6 +413,15 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--peak" => peak_only = true,
             "--no-meter" => meter = false,
             "--list-devices" => list_devices = true,
+            "--bench" => {
+                let duration = match argv.last() {
+                    Some(next) if next.parse::<f64>().is_ok() => {
+                        argv.pop().and_then(|v| v.parse().ok()).unwrap_or(2.0)
+                    }
+                    _ => 2.0,
+                };
+                bench_seconds = Some(duration);
+            }
             "--live" => {
                 // The duration is optional, so only consume the next token when
                 // it actually looks like a number rather than another flag.
@@ -481,16 +497,22 @@ fn parse_args() -> Result<Option<Args>, String> {
         sine_hz.is_some(),
         live_seconds.is_some(),
         list_devices,
+        bench_seconds.is_some(),
     ]
     .iter()
     .filter(|chosen| **chosen)
     .count();
     if selected > 1 {
-        return Err("choose one of: a WAV path, --sine, --live, --list-devices".into());
+        return Err("choose one of: a WAV path, --sine, --live, --list-devices, --bench".into());
     }
 
     let input = if list_devices {
         Input::ListDevices
+    } else if let Some(seconds) = bench_seconds {
+        if seconds <= 0.0 {
+            return Err("--bench duration must be positive".into());
+        }
+        Input::Bench { seconds }
     } else if let Some(duration) = live_seconds {
         if duration <= 0.0 {
             return Err("--live duration must be positive".into());
