@@ -55,6 +55,29 @@ use crate::stream::{AudioBuffers, AudioCallback, AudioStream, StreamConfig, Stre
 /// call clamps the request and re-reads what the device actually granted.
 const MAX_BUFFER_FRAMES: usize = 8192;
 
+/// The HAL's "not permitted" status, observed when microphone access is denied.
+///
+/// CoreAudio does not surface this as a named constant, and it does not arrive
+/// promptly: the server retries `StartAndWaitForState` on a 30 second timeout,
+/// so a denied stream stalls for minutes before failing. Recognising the code
+/// lets the caller say what is actually wrong instead of appearing to hang.
+const HAL_NOT_PERMITTED: OSStatus = 0x1000_4003_u32 as OSStatus;
+
+/// Turn an `OSStatus` from start/stop into something a user can act on.
+fn describe_status(status: OSStatus, operation: &str) -> AudioError {
+    if status == HAL_NOT_PERMITTED {
+        return AudioError::Backend(format!(
+            "{operation} was refused by CoreAudio (status {status}). This is macOS \
+             microphone permission being denied. Grant access under System Settings > \
+             Privacy & Security > Microphone for the application running this code. \
+             Note that TCC will not raise a prompt for a process launched in a \
+             non-interactive background session - it refuses outright - so this must \
+             be run from a foreground terminal or a bundled app at least once."
+        ));
+    }
+    AudioError::Backend(format!("{operation} failed with OSStatus {status}"))
+}
+
 // ---------------------------------------------------------------------------
 // Property helpers
 // ---------------------------------------------------------------------------
@@ -512,9 +535,7 @@ impl AudioStream for CoreAudioStream {
         // SAFETY: proc_id came from AudioDeviceCreateIOProcID on this device.
         let status = unsafe { AudioDeviceStart(self.device, self.proc_id) };
         if status != 0 {
-            return Err(AudioError::Backend(format!(
-                "AudioDeviceStart failed with OSStatus {status}"
-            )));
+            return Err(describe_status(status, "AudioDeviceStart"));
         }
         self.running = true;
         Ok(())
@@ -528,9 +549,7 @@ impl AudioStream for CoreAudioStream {
         let status = unsafe { AudioDeviceStop(self.device, self.proc_id) };
         self.running = false;
         if status != 0 {
-            return Err(AudioError::Backend(format!(
-                "AudioDeviceStop failed with OSStatus {status}"
-            )));
+            return Err(describe_status(status, "AudioDeviceStop"));
         }
         Ok(())
     }

@@ -1,18 +1,18 @@
-//! Headless harness: drives the analysis chain from a WAV file and writes results
-//! as text.
+//! Headless harness: drives the analysis chain from a file, a synthesised
+//! signal, or live hardware, and writes results as text.
 //!
-//! This is the Milestone 0 deliverable. It proves numerical correctness before any
-//! UI exists, which is the opposite of how this kind of project usually goes
-//! wrong. It also exercises every crate in the workspace end to end — the audio
-//! backend, the allocation trap, the capture ring and the spectrum analyzer — so
-//! an integration mistake surfaces here rather than in the app.
+//! This is the Milestone 0 deliverable and the validation vehicle for
+//! everything after it. It proves numerical correctness before any UI exists,
+//! and exercises every crate end to end — audio backend, allocation trap,
+//! capture ring, analysis engine and spectrum analyzer — so an integration
+//! mistake surfaces here rather than in the app.
 //!
-//! Deliberately single-threaded: the stream is pumped and the ring drained in
-//! lockstep on one thread, so output is reproducible. The threaded hand-offs are
-//! already covered by tests in `analyzer-engine`; a correctness harness wants
-//! determinism more than realism.
+//! Offline analysis is deliberately single-threaded and reproducible; live
+//! capture runs the real threaded engine against real hardware.
 
-use std::fmt::Write as _;
+mod live;
+mod report;
+
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -20,11 +20,11 @@ use std::process::ExitCode;
 
 use analyzer_audio::{AudioBuffers, DeviceId, OfflineBackend, Source, StreamConfig};
 use analyzer_dsp::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig, WindowKind};
-use analyzer_engine::{AllocTrap, capture_ring, rt_section};
+use analyzer_engine::{AllocTrap, SpectrumFrame, capture_ring, rt_section};
 
 /// The allocation trap is inert unless a binary registers it. Doing so here is
-/// what makes the guard around the callback below mean anything: if that callback
-/// ever allocates, this process dies instead of quietly glitching.
+/// what makes the guard around every audio callback mean anything: if one ever
+/// allocates, this process dies instead of quietly glitching.
 #[cfg(debug_assertions)]
 #[global_allocator]
 static ALLOC_TRAP: AllocTrap = AllocTrap;
@@ -35,31 +35,41 @@ analyzer-cli - headless spectrum analysis harness
 USAGE:
     analyzer-cli [OPTIONS] <input.wav>
     analyzer-cli [OPTIONS] --sine <hz>
+    analyzer-cli [OPTIONS] --live [seconds]
+    analyzer-cli --list-devices
 
 INPUT:
     <input.wav>          WAV file (16/24/32-bit integer or 32-bit float)
     --sine <hz>          Synthesise a sine instead of reading a file
+    --live [seconds]     Capture from hardware (default 5 seconds)
+    --list-devices       Show every audio device and exit
 
-OPTIONS:
+ANALYSIS:
     --fft <n>            FFT size, even (default 4096)
     --window <name>      rect | hann | bh | flattop | tukey (default hann)
     --overlap <pct>      0 | 50 | 75 | 87 (default 75)
     --average <mode>     none | infinite | peak (default infinite)
     --channel <n>        Which input channel to analyse (default 0)
     --block <frames>     Callback block size (default 128)
+
+LIVE:
+    --device <uid>       Capture device UID (default: system default input)
+    --no-meter           Suppress the running level meter
+
+SYNTHESIS:
     --rate <hz>          Sample rate for --sine (default 48000)
     --seconds <s>        Duration for --sine (default 1.0)
     --amplitude <a>      Peak amplitude for --sine (default 0.5)
+
+OUTPUT:
     --min-db <db>        Omit bins quieter than this
     --peak               Print only the loudest bin
     --out <path>         Write to a file instead of stdout
     -h, --help           This text
 
-OUTPUT:
-    Tab-separated frequency and level, with '#' comment lines carrying the
-    settings. Levels are dBFS with 0 dBFS = full-scale sine. Phase is not
-    emitted: a single-channel spectrum has no phase reference, and padding the
-    column with zeros would be fabricating data.
+Levels are dBFS with 0 dBFS = full-scale sine. Phase is not emitted: a
+single-channel spectrum has no phase reference, and padding the column with
+zeros would be fabricating data.
 ";
 
 fn main() -> ExitCode {
@@ -83,7 +93,20 @@ struct Args {
     block: usize,
     min_db: Option<f32>,
     peak_only: bool,
+    meter: bool,
     out: Option<PathBuf>,
+}
+
+impl Args {
+    fn spectrum(&self, sample_rate: f32) -> SpectrumConfig {
+        SpectrumConfig {
+            sample_rate,
+            size: self.fft,
+            window: self.window,
+            overlap: self.overlap,
+            averaging: self.average,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -95,6 +118,11 @@ enum Input {
         seconds: f64,
         amplitude: f32,
     },
+    Live {
+        device: Option<String>,
+        seconds: f64,
+    },
+    ListDevices,
 }
 
 fn run() -> Result<(), String> {
@@ -103,23 +131,40 @@ fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let source = load_source(&args)?;
-    if source.frames() < args.fft {
-        return Err(format!(
-            "need at least {} frames for a {}-point FFT, source has {}",
-            args.fft,
-            args.fft,
-            source.frames()
-        ));
-    }
-    if args.channel >= source.channels {
-        return Err(format!(
-            "channel {} requested but the source has {}",
-            args.channel, source.channels
-        ));
-    }
-
-    let report = analyse(source, &args)?;
+    let report = match &args.input {
+        Input::ListDevices => live::list_devices()?,
+        Input::Live { device, seconds } => {
+            let options = live::LiveOptions {
+                device: device.clone(),
+                seconds: *seconds,
+                channel: args.channel,
+                block: args.block as u32,
+                // Rate is replaced with whatever the device grants.
+                spectrum: args.spectrum(48_000.0),
+                meter: args.meter,
+            };
+            let frame = live::capture(&options)?;
+            render_live(&frame, &args, &options)?
+        }
+        _ => {
+            let source = load_source(&args)?;
+            if source.frames() < args.fft {
+                return Err(format!(
+                    "need at least {} frames for a {}-point FFT, source has {}",
+                    args.fft,
+                    args.fft,
+                    source.frames()
+                ));
+            }
+            if args.channel >= source.channels {
+                return Err(format!(
+                    "channel {} requested but the source has {}",
+                    args.channel, source.channels
+                ));
+            }
+            analyse_offline(source, &args)?
+        }
+    };
 
     match &args.out {
         Some(path) => {
@@ -133,14 +178,41 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn analyse(source: Source, args: &Args) -> Result<String, String> {
+fn render_live(
+    frame: &SpectrumFrame,
+    args: &Args,
+    options: &live::LiveOptions,
+) -> Result<String, String> {
+    // Rebuild the analyzer purely to recover the window's ENBW and hop for the
+    // header; it never sees a sample.
+    let reference = SpectrumAnalyzer::new(args.spectrum(frame.sample_rate));
+    Ok(report::render(
+        frame,
+        &report::Meta {
+            source: options
+                .device
+                .clone()
+                .unwrap_or_else(|| "default input (live)".into()),
+            channels: 1,
+            channel: args.channel,
+            sample_rate: f64::from(frame.sample_rate),
+            window: args.window,
+            overlap: args.overlap,
+            averaging: args.average,
+            enbw_hz: reference.enbw_hz(),
+            fft_size: reference.size(),
+            hop: reference.hop(),
+        },
+        args.min_db,
+        args.peak_only,
+    ))
+}
+
+fn analyse_offline(source: Source, args: &Args) -> Result<String, String> {
     let rate = source.sample_rate;
     let channels = source.channels;
     let frames = source.frames();
 
-    // Sized for worst-case scheduling latency rather than throughput. Nothing is
-    // descheduled here, but a realistic capacity keeps the harness honest about
-    // what the real engine will do.
     let (mut sink, mut ring) = capture_ring(channels, 8192);
 
     let mut backend = OfflineBackend::new(source, args.block);
@@ -156,9 +228,6 @@ fn analyse(source: Source, args: &Args) -> Result<String, String> {
     let mut stream = backend
         .open_offline(
             &config,
-            // The real-time path. It decides nothing and computes nothing: hand
-            // the block to the ring and return. rt_section aborts the process if
-            // this ever allocates.
             Box::new(move |buffers: &mut AudioBuffers<'_>| {
                 rt_section(|| {
                     sink.write_interleaved(buffers.input());
@@ -167,14 +236,7 @@ fn analyse(source: Source, args: &Args) -> Result<String, String> {
         )
         .map_err(|e| format!("opening offline stream: {e}"))?;
 
-    let mut analyzer = SpectrumAnalyzer::new(SpectrumConfig {
-        sample_rate: rate as f32,
-        size: args.fft,
-        window: args.window,
-        overlap: args.overlap,
-        averaging: args.average,
-    });
-
+    let mut analyzer = SpectrumAnalyzer::new(args.spectrum(rate as f32));
     let mut interleaved = vec![0.0_f32; args.block * channels];
     let mut channel_scratch = vec![0.0_f32; args.block];
 
@@ -187,9 +249,6 @@ fn analyse(source: Source, args: &Args) -> Result<String, String> {
             if read == 0 {
                 break;
             }
-            // Pick out the channel being analysed. A transfer function will need
-            // two of these kept sample-aligned, which is exactly why the ring
-            // carries interleaved frames rather than one queue per channel.
             for (frame, slot) in channel_scratch.iter_mut().take(read).enumerate() {
                 *slot = interleaved
                     .get(frame * channels + args.channel)
@@ -202,8 +261,6 @@ fn analyse(source: Source, args: &Args) -> Result<String, String> {
 
     let overruns = ring.overruns();
     if overruns > 0 {
-        // Never silent. A spectrum computed across dropped audio is wrong, not
-        // merely noisy.
         return Err(format!(
             "{overruns} block(s) dropped - the measurement is invalid"
         ));
@@ -212,53 +269,35 @@ fn analyse(source: Source, args: &Args) -> Result<String, String> {
         return Err("no complete frames were analysed".into());
     }
 
-    let mut db = vec![0.0_f32; analyzer.bins()];
-    analyzer.write_db_fs(&mut db);
+    let mut bins = vec![0.0_f32; analyzer.bins()];
+    analyzer.write_db_fs(&mut bins);
 
-    let mut out = String::with_capacity(analyzer.bins() * 24 + 640);
-    let _ = writeln!(out, "# analyzer-cli spectrum");
-    let _ = writeln!(out, "# sample rate: {rate} Hz");
-    let _ = writeln!(out, "# source: {frames} frames, {channels} channel(s)");
-    let _ = writeln!(out, "# analysed channel: {}", args.channel);
-    let _ = writeln!(out, "# fft size: {}", analyzer.size());
-    let _ = writeln!(
-        out,
-        "# window: {:?}, ENBW {:.4} Hz",
-        args.window,
-        analyzer.enbw_hz()
-    );
-    let _ = writeln!(
-        out,
-        "# overlap: {:.1}%, hop {} frames",
-        args.overlap.fraction() * 100.0,
-        analyzer.hop()
-    );
-    let _ = writeln!(out, "# averaging: {:?}", args.average);
-    let _ = writeln!(out, "# frames averaged: {}", analyzer.frames());
-    let _ = writeln!(out, "# bin spacing: {:.6} Hz", analyzer.bin_spacing_hz());
-    let _ = writeln!(out, "# level reference: 0 dBFS = full-scale sine");
-    let _ = writeln!(out, "# frequency_hz\tlevel_db");
+    let frame = SpectrumFrame {
+        sequence: 1,
+        bins,
+        bin_spacing_hz: analyzer.bin_spacing_hz(),
+        sample_rate: rate as f32,
+        frames_averaged: analyzer.frames(),
+        overruns,
+    };
 
-    if args.peak_only {
-        let peak = db
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .map(|(bin, level)| (bin, *level));
-        if let Some((bin, level)) = peak {
-            let _ = writeln!(out, "{:.6}\t{level:.4}", analyzer.bin_frequency(bin));
-        }
-        return Ok(out);
-    }
-
-    for (bin, level) in db.iter().enumerate() {
-        if args.min_db.is_some_and(|floor| *level < floor) {
-            continue;
-        }
-        let _ = writeln!(out, "{:.6}\t{level:.4}", analyzer.bin_frequency(bin));
-    }
-
-    Ok(out)
+    Ok(report::render(
+        &frame,
+        &report::Meta {
+            source: format!("{frames} frames offline"),
+            channels,
+            channel: args.channel,
+            sample_rate: rate,
+            window: args.window,
+            overlap: args.overlap,
+            averaging: args.average,
+            enbw_hz: analyzer.enbw_hz(),
+            fft_size: analyzer.size(),
+            hop: analyzer.hop(),
+        },
+        args.min_db,
+        args.peak_only,
+    ))
 }
 
 fn load_source(args: &Args) -> Result<Source, String> {
@@ -278,6 +317,9 @@ fn load_source(args: &Args) -> Result<Source, String> {
                 })
                 .collect();
             Ok(Source::mono(samples, *rate))
+        }
+        Input::Live { .. } | Input::ListDevices => {
+            Err("live capture does not load a source".into())
         }
     }
 }
@@ -333,6 +375,9 @@ fn read_wav(path: &Path) -> Result<Source, String> {
 fn parse_args() -> Result<Option<Args>, String> {
     let mut positional: Option<PathBuf> = None;
     let mut sine_hz: Option<f64> = None;
+    let mut live_seconds: Option<f64> = None;
+    let mut list_devices = false;
+    let mut device: Option<String> = None;
     let mut fft = 4096_usize;
     let mut window = WindowKind::Hann;
     let mut overlap = Overlap::ThreeQuarters;
@@ -344,18 +389,35 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut amplitude = 0.5_f32;
     let mut min_db: Option<f32> = None;
     let mut peak_only = false;
+    let mut meter = true;
     let mut out: Option<PathBuf> = None;
 
-    let mut argv = std::env::args().skip(1);
-    while let Some(arg) = argv.next() {
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    argv.reverse();
+
+    while let Some(arg) = argv.pop() {
         let mut value = || -> Result<String, String> {
-            argv.next()
+            argv.pop()
                 .ok_or_else(|| format!("{arg} needs a value (try --help)"))
         };
 
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--peak" => peak_only = true,
+            "--no-meter" => meter = false,
+            "--list-devices" => list_devices = true,
+            "--live" => {
+                // The duration is optional, so only consume the next token when
+                // it actually looks like a number rather than another flag.
+                let duration = match argv.last() {
+                    Some(next) if next.parse::<f64>().is_ok() => {
+                        argv.pop().and_then(|v| v.parse().ok()).unwrap_or(5.0)
+                    }
+                    _ => 5.0,
+                };
+                live_seconds = Some(duration);
+            }
+            "--device" => device = Some(value()?),
             "--sine" => sine_hz = Some(number(&value()?, "--sine")?),
             "--fft" => fft = number(&value()?, "--fft")?,
             "--channel" => channel = number(&value()?, "--channel")?,
@@ -414,21 +476,43 @@ fn parse_args() -> Result<Option<Args>, String> {
         return Err("--block must be non-zero".into());
     }
 
-    let input = match (positional, sine_hz) {
-        (Some(_), Some(_)) => return Err("give either a WAV path or --sine, not both".into()),
-        (Some(path), None) => Input::Wav(path),
-        (None, Some(hz)) => {
-            if rate <= 0.0 {
-                return Err("--rate must be positive".into());
-            }
-            Input::Sine {
-                hz,
-                rate,
-                seconds,
-                amplitude,
-            }
+    let selected = [
+        positional.is_some(),
+        sine_hz.is_some(),
+        live_seconds.is_some(),
+        list_devices,
+    ]
+    .iter()
+    .filter(|chosen| **chosen)
+    .count();
+    if selected > 1 {
+        return Err("choose one of: a WAV path, --sine, --live, --list-devices".into());
+    }
+
+    let input = if list_devices {
+        Input::ListDevices
+    } else if let Some(duration) = live_seconds {
+        if duration <= 0.0 {
+            return Err("--live duration must be positive".into());
         }
-        (None, None) => return Err("no input given (try --help)".into()),
+        Input::Live {
+            device,
+            seconds: duration,
+        }
+    } else if let Some(path) = positional {
+        Input::Wav(path)
+    } else if let Some(hz) = sine_hz {
+        if rate <= 0.0 {
+            return Err("--rate must be positive".into());
+        }
+        Input::Sine {
+            hz,
+            rate,
+            seconds,
+            amplitude,
+        }
+    } else {
+        return Err("no input given (try --help)".into());
     };
 
     Ok(Some(Args {
@@ -441,6 +525,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         block,
         min_db,
         peak_only,
+        meter,
         out,
     }))
 }
