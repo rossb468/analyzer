@@ -1,0 +1,119 @@
+# analyzer
+
+A native real-time audio and acoustic measurement tool. Rust core, native UI per
+platform, macOS first.
+
+> **Status: pre-alpha.** The DSP core, audio abstraction and real-time plumbing
+> work and are tested. There is no user interface yet, and no hardware backend —
+> audio currently comes from files or synthesis. `analyzer` is a working name.
+
+## Why
+
+[Room EQ Wizard](https://www.roomeqwizard.com/) is the free standard for room and
+loudspeaker acoustics, and it is a Java/Swing application from 2005. Every plot is
+CPU-rasterised through Java2D, its own documentation suggests turning off
+anti-aliasing "for faster drawing", and there is no real-time-safe audio path.
+[Open Sound Meter](https://github.com/psmokotnin/osm) and
+[Smaart](https://www.rationalacoustics.com/) cover live analysis;
+[FuzzMeasure](https://rodetest.com/) covers swept measurement on macOS but has no
+real-time analyzer at all.
+
+The gap is a genuinely native, genuinely fast **live** analyzer. That is what this
+starts with.
+
+## Building
+
+Needs Rust 1.87 or newer.
+
+```bash
+cargo test --workspace
+```
+
+## Trying it
+
+The headless harness runs the whole analysis chain from a file or a synthesised
+signal. It needs no hardware.
+
+```bash
+cargo run -p analyzer-cli -- --help
+```
+
+A half-scale sine on an exact bin centre should read −6.02 dBFS:
+
+```bash
+cargo run -p analyzer-cli -- --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak
+```
+
+Off a bin centre, the window choice starts to matter — which is why there is more
+than one:
+
+```bash
+for w in hann bh flattop; do cargo run -q -p analyzer-cli -- --sine 1000 --amplitude 0.5 --seconds 1 --window $w --peak | grep -v '^#'; done
+```
+
+Flat-top loses about 0.002 dB to scalloping where Hann loses 0.63 dB. That is the
+whole reason flat-top exists, and it is why it is the window to calibrate with.
+
+## Architecture
+
+```
+crates/
+  analyzer-dsp/       FFT, windows, spectra. No I/O, no platform dependencies.
+  analyzer-cal/       Calibration chain: converter samples to absolute dB SPL.
+  analyzer-audio/     AudioBackend trait and platform backends.
+  analyzer-engine/    Lock-free buffering, snapshot publication, allocation trap.
+  analyzer-model/     Session state and the measurement store.
+  analyzer-plot/      Display data reduction and axis transforms. Emits no pixels.
+  analyzer-ffi/       Stable C ABI for the platform user interfaces.
+apps/macos/           Swift + SwiftUI shell with a Metal renderer.
+tools/analyzer-cli/   Headless harness.
+```
+
+The thread topology is where the performance comes from:
+
+```
+audio thread          ring         analysis thread     triple buffer    UI thread
+────────────                       ───────────────                      ─────────
+hard deadline    ──▶  [ring]  ──▶  heavy FFT work  ──▶  [snapshot] ──▶  draws
+deinterleave                       no deadline,          newest wins     never
+and return                         must keep up                          blocks
+```
+
+Three decisions worth knowing about:
+
+**The audio callback cannot allocate, and that is enforced rather than trusted.**
+Every real-time audio codebase has this rule; most enforce it by code review,
+which means violations ship and surface as a click once an hour on somebody
+else's machine. Here the callback runs inside a guard that aborts the process, and
+CI runs the same guard.
+
+**The capture ring is interleaved and writes are all-or-nothing.** With one ring
+per channel a partial write could advance one channel and not another, and
+channels that drift by a single sample destroy a transfer-function phase reading.
+Dropped blocks are counted and surfaced, never hidden — a measurement taken across
+dropped audio is wrong, not merely noisy.
+
+**The core emits no pixels.** Line traces are generated as geometry, but the
+waterfall is one column of data per frame written into a GPU ring texture.
+Recompositing a full Retina waterfall on the CPU is roughly what REW does, and it
+is why its waterfall is slow.
+
+## Portability
+
+macOS comes first and deep, but the deferral is designed for rather than assumed
+away: no application logic lives in Swift, `AudioBackend` and `Fft` are traits
+with one implementation each, and no Apple SDK type appears outside
+`apps/macos/` and one `cfg(target_os = "macos")` module.
+
+## Licence
+
+Dual licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+One dependency, `triple_buffer`, is MPL-2.0. That is file-level copyleft and MPL
+§3.3 explicitly permits linking from a differently-licensed larger work, so it is
+compatible — noted because it is the only non-permissive dependency in the tree.
