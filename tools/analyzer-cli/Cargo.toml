@@ -1,0 +1,13 @@
+[package]
+name = "analyzer-cli"
+description = "Headless harness: drives the analysis chain from a WAV file and writes results as text."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

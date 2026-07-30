@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Generated at build time by cbindgen, never committed.
+/crates/analyzer-ffi/include/analyzer.h
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/

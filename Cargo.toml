@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Ross Bower <rossbower@icloud.com>"]
+
+[workspace.dependencies]
+# Internal crates.
+analyzer-audio = { path = "crates/analyzer-audio" }
+analyzer-cal = { path = "crates/analyzer-cal" }
+analyzer-dsp = { path = "crates/analyzer-dsp" }
+analyzer-engine = { path = "crates/analyzer-engine" }
+analyzer-model = { path = "crates/analyzer-model" }
+analyzer-plot = { path = "crates/analyzer-plot" }
+
+# External.
+assert_no_alloc = "1.1"
+hound = "3.5"
+realfft = "3.5"
+rtrb = "0.3"
+rustfft = "6.4"
+thiserror = "2"
+triple_buffer = "9"
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Real-time audio code must never hide an allocation or a panic behind a convenience.
+indexing_slicing = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
