@@ -328,7 +328,13 @@ mod tests {
         bins[10] = -20.0;
         bins[50] = -20.0;
         let total = broadband_db(&bins);
-        assert!((total - -17.0).abs() < 0.01, "got {total}");
+        // Doubling power is +10*log10(2) = +3.0103 dB, so -20 becomes -16.9897.
+        // Rounding that to -17.0 is what made this fail the first time.
+        let expected = -20.0 + 10.0 * 2.0_f32.log10();
+        assert!(
+            (total - expected).abs() < 0.001,
+            "got {total}, want {expected}"
+        );
     }
 
     #[test]

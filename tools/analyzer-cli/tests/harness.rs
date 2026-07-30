@@ -286,11 +286,27 @@ fn source_shorter_than_the_fft_is_rejected() {
     assert!(stderr.contains("need at least"), "stderr: {stderr}");
 }
 
+/// The input modes are mutually exclusive; picking two must be refused rather
+/// than one silently winning.
 #[test]
-fn both_file_and_sine_is_an_error() {
-    let output = run(&["--sine", "1000", "some.wav"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not both"));
+fn combining_input_modes_is_an_error() {
+    for args in [
+        vec!["--sine", "1000", "some.wav"],
+        vec!["--live", "1", "--sine", "1000"],
+        vec!["--list-devices", "--sine", "1000"],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success(), "{args:?} should have failed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("choose one of"), "{args:?} gave: {stderr}");
+    }
+}
+
+#[test]
+fn list_devices_succeeds_without_capture_permission() {
+    let output = run(&["--list-devices"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Audio devices"));
 }
 
 #[test]
