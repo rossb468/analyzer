@@ -52,7 +52,7 @@ impl ResponseCurve {
     /// actually measured invents data, and the error grows fastest exactly where
     /// the curve is steepest.
     pub fn db_at(&self, hz: f32) -> f32 {
-        if self.points.is_empty() || !(hz > 0.0) {
+        if self.points.is_empty() || !hz.is_finite() || hz <= 0.0 {
             return 0.0;
         }
         let Some(&(first_hz, first_db)) = self.points.first() else {

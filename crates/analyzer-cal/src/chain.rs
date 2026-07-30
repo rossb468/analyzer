@@ -78,7 +78,14 @@ impl Calibration {
         preamp_gain_db: f32,
         full_scale_volts: f32,
     ) -> Option<Self> {
-        if !(sensitivity_mv_per_pa > 0.0) || !(full_scale_volts > 0.0) {
+        // Positive form, and finiteness checked explicitly: a NaN from a
+        // mis-parsed datasheet field would otherwise sail through a bare
+        // comparison and produce an infinite offset.
+        let usable = sensitivity_mv_per_pa.is_finite()
+            && full_scale_volts.is_finite()
+            && sensitivity_mv_per_pa > 0.0
+            && full_scale_volts > 0.0;
+        if !usable {
             return None;
         }
         // Volts at the converter when the capsule sees 1 Pa, i.e. 94 dB SPL.
