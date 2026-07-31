@@ -296,10 +296,21 @@ impl CoreAudioBackend {
     ) -> Result<CoreAudioStream, AudioError> {
         config.validate()?;
 
-        if !config.output_channels.is_empty() {
-            return Err(AudioError::Backend(
-                "the CoreAudio backend is input-only for now".into(),
-            ));
+        // Input and output must be the same device.
+        //
+        // An IOProc belongs to one device, so two devices means two procs on two
+        // clocks, and a transfer function measured across unsynchronised clocks
+        // drifts in phase until it is meaningless. macOS already solves this
+        // with aggregate devices, which present two interfaces as one clock
+        // domain - so the answer is to point at an aggregate, not to pretend two
+        // procs are one.
+        if let (Some(input), Some(output)) = (&config.input, &config.output)
+            && input != output
+        {
+            return Err(AudioError::Backend(format!(
+                "input '{input}' and output '{output}' are different devices; \
+                 create an aggregate device in Audio MIDI Setup so they share a clock"
+            )));
         }
         let uid = config
             .input
@@ -311,7 +322,7 @@ impl CoreAudioBackend {
         let name =
             cfstring_property(device, kAudioObjectPropertyName).unwrap_or_else(|| uid.to_string());
         let available = channel_count(device, kAudioObjectPropertyScopeInput);
-        if available == 0 {
+        if available == 0 && !config.input_channels.is_empty() {
             return Err(AudioError::ChannelOutOfRange {
                 device: name,
                 channel: 0,
@@ -321,9 +332,20 @@ impl CoreAudioBackend {
         for &channel in &config.input_channels {
             if channel >= available {
                 return Err(AudioError::ChannelOutOfRange {
-                    device: name,
+                    device: name.clone(),
                     channel,
                     available,
+                });
+            }
+        }
+
+        let outputs_available = channel_count(device, kAudioObjectPropertyScopeOutput);
+        for &channel in &config.output_channels {
+            if channel >= outputs_available {
+                return Err(AudioError::ChannelOutOfRange {
+                    device: name.clone(),
+                    channel,
+                    available: outputs_available,
                 });
             }
         }
@@ -333,13 +355,16 @@ impl CoreAudioBackend {
 
         let selected = config.input_channels.clone();
         let selected_count = selected.len();
+        let outputs = config.output_channels.clone();
+        let output_count = outputs.len();
 
         // Every buffer the IOProc touches is allocated here, once.
         let mut state = Box::new(IoProcState {
             callback,
             interleaved: vec![0.0; MAX_BUFFER_FRAMES * selected_count.max(1)],
-            no_output: Vec::new(),
+            output_scratch: vec![0.0; MAX_BUFFER_FRAMES * output_count.max(1)],
             selected,
+            outputs,
         });
 
         let mut proc_id: AudioDeviceIOProcID = None;
@@ -458,7 +483,12 @@ fn read_latency(device: AudioDeviceID) -> StreamLatency {
             kAudioObjectPropertyScopeInput,
         )
         .unwrap_or(0),
-        output_frames: 0,
+        output_frames: scalar::<u32>(
+            device,
+            kAudioDevicePropertyLatency,
+            kAudioObjectPropertyScopeOutput,
+        )
+        .unwrap_or(0),
         safety_offset_frames: scalar::<u32>(
             device,
             kAudioDevicePropertySafetyOffset,
@@ -501,11 +531,12 @@ impl AudioBackend for CoreAudioBackend {
 /// open so the IOProc allocates nothing.
 struct IoProcState {
     callback: Box<dyn AudioCallback>,
-    /// Selected channels, interleaved, refilled each callback.
+    /// Selected input channels, interleaved, refilled each callback.
     interleaved: Vec<f32>,
-    /// Empty: this backend is input-only, and `AudioBuffers` still wants a slice.
-    no_output: Vec<f32>,
+    /// Interleaved output the callback writes, scattered afterwards.
+    output_scratch: Vec<f32>,
     selected: Vec<u32>,
+    outputs: Vec<u32>,
 }
 
 /// A running CoreAudio input stream.
@@ -599,7 +630,7 @@ unsafe extern "C" fn io_proc(
     _now: *const AudioTimeStamp,
     input: *const AudioBufferList,
     _input_time: *const AudioTimeStamp,
-    _output: *mut AudioBufferList,
+    output: *mut AudioBufferList,
     _output_time: *const AudioTimeStamp,
     client: *mut c_void,
 ) -> OSStatus {
@@ -615,21 +646,136 @@ unsafe extern "C" fn io_proc(
     let IoProcState {
         callback,
         interleaved,
-        no_output,
+        output_scratch,
         selected,
+        outputs,
     } = state;
 
     // SAFETY: CoreAudio guarantees a well-formed AudioBufferList here.
-    let frames = unsafe { gather_input(input, selected, interleaved) };
+    let mut frames = unsafe { gather_input(input, selected, interleaved) };
     if frames == 0 {
-        return 0;
+        // An output-only stream still has work to do, so fall back to what the
+        // output side is asking for rather than returning early.
+        frames = unsafe { output_frames(output) };
+        if frames == 0 {
+            return 0;
+        }
     }
 
     let channels = selected.len();
+    let output_channels = outputs.len();
     let gathered = interleaved.get(..frames * channels).unwrap_or(&[]);
-    let mut buffers = AudioBuffers::new(gathered, no_output, channels, 0, frames);
+
+    let out_len = frames * output_channels;
+    let writable = output_scratch.get_mut(..out_len).unwrap_or(&mut []);
+    // Never hand the callback stale contents: whatever was here last block would
+    // otherwise play again if the callback declined to write.
+    writable.fill(0.0);
+
+    let mut buffers = AudioBuffers::new(gathered, writable, channels, output_channels, frames);
     callback.process(&mut buffers);
+
+    if output_channels > 0 {
+        // SAFETY: scatter_output null-checks the list itself.
+        unsafe { scatter_output(output, outputs, output_scratch, frames) };
+    }
     0
+}
+
+/// Frames the output side is asking for, when there is no input to size against.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `AudioBufferList`.
+unsafe fn output_frames(list: *mut AudioBufferList) -> usize {
+    if list.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees validity.
+    unsafe {
+        if (*list).mNumberBuffers == 0 {
+            return 0;
+        }
+        let buffer = &*(*list).mBuffers.as_ptr();
+        let channels = buffer.mNumberChannels.max(1) as usize;
+        (buffer.mDataByteSize as usize / size_of::<f32>()) / channels
+    }
+}
+
+/// Write the interleaved scratch back into CoreAudio's output buffers.
+///
+/// Only the selected channels are written; every other channel the device
+/// exposes is silenced rather than left alone, because a measurement stimulus
+/// escaping from a channel the user did not choose is a genuinely bad surprise -
+/// and a device buffer is not guaranteed to arrive clean.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `AudioBufferList` with `Float32` samples.
+unsafe fn scatter_output(
+    list: *mut AudioBufferList,
+    selected_channels: &[u32],
+    interleaved: &[f32],
+    frames: usize,
+) {
+    if list.is_null() || selected_channels.is_empty() {
+        return;
+    }
+    // SAFETY: caller guarantees a valid list.
+    let (buffer_count, buffers) = unsafe {
+        (
+            (*list).mNumberBuffers as usize,
+            (*list).mBuffers.as_mut_ptr(),
+        )
+    };
+    if buffer_count == 0 {
+        return;
+    }
+
+    for index in 0..buffer_count {
+        // SAFETY: index < buffer_count.
+        let buffer = unsafe { &mut *buffers.add(index) };
+        if buffer.mData.is_null() {
+            continue;
+        }
+        let count = buffer.mDataByteSize as usize / size_of::<f32>();
+        // SAFETY: the buffer reports its own size in bytes.
+        unsafe { std::ptr::write_bytes(buffer.mData.cast::<f32>(), 0, count) };
+    }
+
+    let stride = selected_channels.len();
+    for (slot, &wanted) in selected_channels.iter().enumerate() {
+        let mut base = 0_u32;
+        let mut target: Option<(*mut f32, usize, usize)> = None;
+        for index in 0..buffer_count {
+            // SAFETY: index < buffer_count.
+            let buffer = unsafe { &mut *buffers.add(index) };
+            let channels = buffer.mNumberChannels;
+            if wanted < base + channels {
+                target = Some((
+                    buffer.mData.cast::<f32>(),
+                    (wanted - base) as usize,
+                    channels.max(1) as usize,
+                ));
+                break;
+            }
+            base += channels;
+        }
+
+        let Some((data, offset, device_stride)) = target else {
+            continue;
+        };
+        if data.is_null() {
+            continue;
+        }
+        for frame in 0..frames {
+            let Some(sample) = interleaved.get(frame * stride + slot) else {
+                continue;
+            };
+            // SAFETY: stays inside the buffer whose byte size gave us `frames`.
+            unsafe { *data.add(frame * device_stride + offset) = *sample };
+        }
+    }
 }
 
 /// Copy the selected channels out of CoreAudio's buffer list into one
@@ -766,18 +912,52 @@ mod tests {
         assert!(matches!(result, Err(AudioError::DeviceNotFound(_))));
     }
 
+    /// Two devices means two IOProcs on two clocks, and a transfer function
+    /// measured across unsynchronised clocks drifts in phase until it is
+    /// meaningless. The error has to point at aggregate devices, which is the
+    /// actual fix.
     #[test]
-    fn output_channels_are_rejected_while_the_backend_is_input_only() {
+    fn split_input_and_output_devices_are_refused_with_a_way_forward() {
         let mut backend = CoreAudioBackend::new();
         let config = StreamConfig {
-            input: Some(DeviceId::new("whatever")),
-            output: None,
+            input: Some(DeviceId::new("device-a")),
+            output: Some(DeviceId::new("device-b")),
             sample_rate: 48_000.0,
             buffer_frames: 512,
             input_channels: vec![0],
             output_channels: vec![0],
         };
-        let result = backend.open_input(&config, Box::new(|_: &mut AudioBuffers<'_>| {}));
-        assert!(matches!(result, Err(AudioError::Backend(_))));
+        match backend.open_input(&config, Box::new(|_: &mut AudioBuffers<'_>| {})) {
+            Err(AudioError::Backend(message)) => {
+                assert!(message.contains("aggregate"), "unhelpful error: {message}");
+            }
+            other => panic!("expected a backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_same_device_for_both_directions_is_accepted() {
+        let mut backend = CoreAudioBackend::new();
+        let Some(device) = backend.default_output().unwrap() else {
+            return;
+        };
+        let config = StreamConfig {
+            input: Some(device.id.clone()),
+            output: Some(device.id.clone()),
+            sample_rate: device.default_sample_rate,
+            buffer_frames: 512,
+            input_channels: Vec::new(),
+            output_channels: vec![0],
+        };
+        // Opening can still fail on hardware or permissions, but never with the
+        // split-device complaint.
+        if let Err(AudioError::Backend(message)) =
+            backend.open_input(&config, Box::new(|_: &mut AudioBuffers<'_>| {}))
+        {
+            assert!(
+                !message.contains("aggregate"),
+                "one device treated as split: {message}"
+            );
+        }
     }
 }
