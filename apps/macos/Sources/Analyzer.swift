@@ -254,6 +254,32 @@ final class AnalyzerSessionHandle {
         )
     }
 
+    /// Write the current spectrum to a measurement file.
+    ///
+    /// - Throws: [`AnalyzerError`] with whatever the core reported, which is
+    ///   usually a filesystem problem worth showing verbatim.
+    func save(to url: URL, name: String, splOffsetDb: Float = 0) throws {
+        try write(to: url, name: name, splOffsetDb: splOffsetDb, asText: false)
+    }
+
+    /// Write the current spectrum as REW-compatible text.
+    func exportText(to url: URL, name: String, splOffsetDb: Float = 0) throws {
+        try write(to: url, name: name, splOffsetDb: splOffsetDb, asText: true)
+    }
+
+    private func write(to url: URL, name: String, splOffsetDb: Float, asText: Bool) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var status = AnalyzerStatus()
+        let ok = url.path.withCString { path in
+            name.withCString { label in
+                asText
+                    ? analyzer_session_export_text(handle, path, label, splOffsetDb, &status)
+                    : analyzer_session_save_measurement(handle, path, label, splOffsetDb, &status)
+            }
+        }
+        guard ok else { throw AnalyzerError.failed(Self.message(from: status)) }
+    }
+
     // Axis queries. These call into Rust rather than computing anything here,
     // so labels, cursor readout and the drawn curve cannot disagree.
 

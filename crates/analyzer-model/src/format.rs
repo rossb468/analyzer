@@ -119,6 +119,7 @@ pub fn write(measurement: &Measurement) -> Vec<u8> {
 
     match &measurement.data {
         MeasurementData::Spectrum { bin_spacing_hz, .. }
+        | MeasurementData::PowerSpectrum { bin_spacing_hz, .. }
         | MeasurementData::TransferFunction { bin_spacing_hz, .. } => {
             let _ = writeln!(header, "bin_spacing_hz: {bin_spacing_hz}");
         }
@@ -157,6 +158,7 @@ pub fn write(measurement: &Measurement) -> Vec<u8> {
     let mut out = header.into_bytes();
     match &measurement.data {
         MeasurementData::Spectrum { bins, .. } => push_complex(&mut out, bins),
+        MeasurementData::PowerSpectrum { magnitude_db, .. } => push_real(&mut out, magnitude_db),
         MeasurementData::TransferFunction {
             bins, coherence, ..
         } => {
@@ -219,6 +221,10 @@ pub fn read(bytes: &[u8]) -> Result<Measurement, FormatError> {
     let payload = match kind.as_str() {
         "spectrum" => MeasurementData::Spectrum {
             bins: read_complex(data, points)?,
+            bin_spacing_hz: number("bin_spacing_hz")?,
+        },
+        "power_spectrum" => MeasurementData::PowerSpectrum {
+            magnitude_db: read_real(data, points, 0)?,
             bin_spacing_hz: number("bin_spacing_hz")?,
         },
         "impulse_response" => MeasurementData::ImpulseResponse {
@@ -488,6 +494,21 @@ mod tests {
         m.notes = "line one\nline two\\with a backslash".into();
         let restored = read(&write(&m)).unwrap();
         assert_eq!(restored.notes, m.notes);
+    }
+
+    #[test]
+    fn a_power_spectrum_round_trips() {
+        let mut original = Measurement::new(
+            MeasurementId(11),
+            "RTA capture",
+            48_000.0,
+            MeasurementData::PowerSpectrum {
+                magnitude_db: (0..128).map(|k| -100.0 + k as f64 * 0.37).collect(),
+                bin_spacing_hz: 11.71875,
+            },
+        );
+        original.references.spl_offset_db = Some(112.5);
+        assert_eq!(read(&write(&original)).unwrap(), original);
     }
 
     #[test]

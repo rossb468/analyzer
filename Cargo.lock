@@ -59,6 +59,7 @@ dependencies = [
  "analyzer-audio",
  "analyzer-dsp",
  "analyzer-engine",
+ "analyzer-model",
  "analyzer-plot",
  "cbindgen",
 ]

@@ -1,5 +1,6 @@
 import SwiftUI
 import MetalKit
+import UniformTypeIdentifiers
 import AnalyzerFFI
 
 /// Holds the session and the settings the UI can change.
@@ -89,6 +90,33 @@ final class AnalyzerModel: ObservableObject {
         session?.stop()
         session = nil
         isRunning = false
+    }
+
+    /// Ask for a location and write the current spectrum there.
+    ///
+    /// The panel is driven from the model rather than the view so the error path
+    /// has somewhere to land - a failed save that says nothing is worse than no
+    /// save button.
+    func save(asText: Bool) {
+        guard let session else { return }
+        let panel = NSSavePanel()
+        panel.title = asText ? "Export measurement as text" : "Save measurement"
+        panel.nameFieldStringValue = asText ? "measurement.txt" : "measurement.anlz"
+        panel.allowedContentTypes = asText ? [.plainText] : []
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let name = url.deletingPathExtension().lastPathComponent
+            if asText {
+                try session.exportText(to: url, name: name)
+            } else {
+                try session.save(to: url, name: name)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func restartIfRunning() {
@@ -294,6 +322,13 @@ struct ContentView: View {
                 .toggleStyle(.checkbox)
             Button("Reset avg") { model.session?.resetAverage() }
                 .disabled(!model.isRunning)
+
+            Menu("Save") {
+                Button("Measurement…") { model.save(asText: false) }
+                Button("Text (REW)…") { model.save(asText: true) }
+            }
+            .frame(width: 90)
+            .disabled(!model.isRunning)
 
             Button(model.isRunning ? "Stop" : "Start") {
                 model.isRunning ? model.stop() : model.start()

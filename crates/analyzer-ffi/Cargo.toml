@@ -18,6 +18,7 @@ workspace = true
 analyzer-audio = { workspace = true }
 analyzer-dsp = { workspace = true }
 analyzer-engine = { workspace = true }
+analyzer-model = { workspace = true }
 analyzer-plot = { workspace = true }
 
 [build-dependencies]

@@ -34,6 +34,7 @@ use analyzer_audio::{
 };
 use analyzer_dsp::{Averaging, DistortionConfig, Overlap, SpectrumConfig, WindowKind};
 use analyzer_engine::{Engine, EngineConfig, rt_section};
+use analyzer_model::{Measurement, MeasurementData, MeasurementId, References};
 use analyzer_plot::{FrequencyAxis, LevelAxis, Reduction, Trace, reduce};
 
 /// Longest message [`AnalyzerStatus`] can carry, including the terminator.
@@ -951,6 +952,176 @@ pub unsafe extern "C" fn analyzer_session_distortion(
     })
 }
 
+/// Save the current spectrum to a measurement file.
+///
+/// Writes a magnitude-only measurement, because that is what an RTA produces -
+/// squaring the magnitude discarded the phase, and a file claiming zero phase
+/// would be indistinguishable from one that measured it.
+///
+/// Whether the levels are dB SPL or dBFS is recorded rather than assumed:
+/// `spl_offset_db` is stored when non-zero and omitted otherwise, so a reader
+/// can tell a calibrated measurement from an uncalibrated one.
+///
+/// # Safety
+///
+/// `session` must be null or live. `path` and `name` must be NUL-terminated
+/// strings. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_save_measurement(
+    session: *mut AnalyzerSession,
+    path: *const c_char,
+    name: *const c_char,
+    spl_offset_db: f32,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+        let label = if name.is_null() {
+            "Measurement".to_owned()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(name) }
+                .to_str()
+                .unwrap_or("Measurement")
+                .to_owned()
+        };
+
+        let session = unsafe { &mut *session };
+        let (magnitude_db, bin_spacing_hz, sample_rate) = {
+            let frame = session.engine.latest();
+            (
+                frame
+                    .bins
+                    .iter()
+                    .map(|db| f64::from(*db))
+                    .collect::<Vec<f64>>(),
+                f64::from(frame.bin_spacing_hz),
+                f64::from(frame.sample_rate),
+            )
+        };
+        if magnitude_db.is_empty() {
+            unsafe { set_status(status, AnalyzerStatus::failure("nothing captured yet")) };
+            return false;
+        }
+
+        let mut measurement = Measurement::new(
+            MeasurementId(0),
+            label,
+            sample_rate,
+            MeasurementData::PowerSpectrum {
+                magnitude_db,
+                bin_spacing_hz,
+            },
+        );
+        measurement.references = References {
+            // Zero means uncalibrated here, which stays None - "not measured"
+            // and "measured as needing no correction" are different facts.
+            spl_offset_db: (spl_offset_db != 0.0).then(|| f64::from(spl_offset_db)),
+            ..References::default()
+        };
+
+        match std::fs::write(&path, analyzer_model::write(&measurement)) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
+/// Export the current spectrum as REW-compatible text.
+///
+/// # Safety
+///
+/// As [`analyzer_session_save_measurement`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_export_text(
+    session: *mut AnalyzerSession,
+    path: *const c_char,
+    name: *const c_char,
+    spl_offset_db: f32,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => return false,
+        };
+        let label = if name.is_null() {
+            "Measurement".to_owned()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(name) }
+                .to_str()
+                .unwrap_or("Measurement")
+                .to_owned()
+        };
+
+        let session = unsafe { &mut *session };
+        let (magnitude_db, bin_spacing_hz, sample_rate) = {
+            let frame = session.engine.latest();
+            (
+                frame
+                    .bins
+                    .iter()
+                    .map(|db| f64::from(*db))
+                    .collect::<Vec<f64>>(),
+                f64::from(frame.bin_spacing_hz),
+                f64::from(frame.sample_rate),
+            )
+        };
+
+        let mut measurement = Measurement::new(
+            MeasurementId(0),
+            label,
+            sample_rate,
+            MeasurementData::PowerSpectrum {
+                magnitude_db,
+                bin_spacing_hz,
+            },
+        );
+        measurement.references.spl_offset_db =
+            (spl_offset_db != 0.0).then(|| f64::from(spl_offset_db));
+
+        match std::fs::write(&path, analyzer_model::export::to_text(&measurement)) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
 /// Copy the captured device's name into a caller buffer, returning its length.
 ///
 /// # Safety
@@ -1133,6 +1304,20 @@ mod tests {
             assert!(!analyzer_session_reset_average(ptr::null_mut()));
             assert!(!analyzer_session_distortion(
                 ptr::null_mut(),
+                0.0,
+                ptr::null_mut()
+            ));
+            assert!(!analyzer_session_save_measurement(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                ptr::null_mut()
+            ));
+            assert!(!analyzer_session_export_text(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
                 0.0,
                 ptr::null_mut()
             ));

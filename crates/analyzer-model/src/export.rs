@@ -68,6 +68,22 @@ pub fn to_text(measurement: &Measurement) -> String {
                 );
             }
         }
+        MeasurementData::PowerSpectrum {
+            magnitude_db,
+            bin_spacing_hz,
+        } => {
+            // Two columns, not three. REW's importer accepts a missing phase
+            // column, and inventing one would be worse than omitting it.
+            let _ = writeln!(out, "* Freq(Hz) SPL(dB)");
+            for (index, level) in magnitude_db.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "{:.6} {:.4}",
+                    index as f64 * bin_spacing_hz,
+                    level + offset
+                );
+            }
+        }
         MeasurementData::TransferFunction {
             bins,
             coherence,

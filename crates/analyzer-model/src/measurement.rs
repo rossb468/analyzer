@@ -84,6 +84,19 @@ pub enum MeasurementData {
         /// and, at 48 kHz, 7 mm of path length per sample.
         time_zero_samples: f64,
     },
+    /// A magnitude-only spectrum, as an RTA produces.
+    ///
+    /// Deliberately a separate variant rather than a [`MeasurementData::Spectrum`]
+    /// with zero imaginary parts. A power spectrum discards phase when it squares
+    /// the magnitude - there is no phase to store, and writing zeros would be
+    /// indistinguishable from having measured zero phase. Later code would
+    /// believe it.
+    PowerSpectrum {
+        /// Level per bin in decibels.
+        magnitude_db: Vec<f64>,
+        /// Hertz between bins.
+        bin_spacing_hz: f64,
+    },
     /// A two-channel transfer function with its coherence.
     TransferFunction {
         /// Complex response per bin.
@@ -101,6 +114,7 @@ impl MeasurementData {
     pub fn kind(&self) -> &'static str {
         match self {
             MeasurementData::Spectrum { .. } => "spectrum",
+            MeasurementData::PowerSpectrum { .. } => "power_spectrum",
             MeasurementData::ImpulseResponse { .. } => "impulse_response",
             MeasurementData::TransferFunction { .. } => "transfer_function",
         }
@@ -110,6 +124,7 @@ impl MeasurementData {
     pub fn len(&self) -> usize {
         match self {
             MeasurementData::Spectrum { bins, .. } => bins.len(),
+            MeasurementData::PowerSpectrum { magnitude_db, .. } => magnitude_db.len(),
             MeasurementData::ImpulseResponse { samples, .. } => samples.len(),
             MeasurementData::TransferFunction { bins, .. } => bins.len(),
         }
@@ -124,6 +139,7 @@ impl MeasurementData {
     pub fn bin_spacing_hz(&self) -> Option<f64> {
         match self {
             MeasurementData::Spectrum { bin_spacing_hz, .. }
+            | MeasurementData::PowerSpectrum { bin_spacing_hz, .. }
             | MeasurementData::TransferFunction { bin_spacing_hz, .. } => Some(*bin_spacing_hz),
             MeasurementData::ImpulseResponse { .. } => None,
         }
@@ -136,6 +152,10 @@ impl MeasurementData {
         let bins = match self {
             MeasurementData::Spectrum { bins, .. }
             | MeasurementData::TransferFunction { bins, .. } => bins,
+            // Already in decibels; nothing to derive.
+            MeasurementData::PowerSpectrum { magnitude_db, .. } => {
+                return Some(magnitude_db.clone());
+            }
             MeasurementData::ImpulseResponse { .. } => return None,
         };
         Some(
@@ -157,7 +177,10 @@ impl MeasurementData {
         let bins = match self {
             MeasurementData::Spectrum { bins, .. }
             | MeasurementData::TransferFunction { bins, .. } => bins,
-            MeasurementData::ImpulseResponse { .. } => return None,
+            // No phase was ever measured, so none is reported.
+            MeasurementData::PowerSpectrum { .. } | MeasurementData::ImpulseResponse { .. } => {
+                return None;
+            }
         };
         Some(bins.iter().map(|bin| bin.arg().to_degrees()).collect())
     }
@@ -358,5 +381,41 @@ mod tests {
             .kind(),
             "transfer_function"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod power_spectrum_tests {
+    use super::*;
+
+    fn power_spectrum() -> MeasurementData {
+        MeasurementData::PowerSpectrum {
+            magnitude_db: vec![-40.0, -35.0, -60.0],
+            bin_spacing_hz: 10.0,
+        }
+    }
+
+    #[test]
+    fn magnitude_passes_straight_through() {
+        assert_eq!(
+            power_spectrum().magnitude_db().unwrap(),
+            vec![-40.0, -35.0, -60.0]
+        );
+    }
+
+    /// The reason the variant exists: an RTA never measured phase, so it must
+    /// not report any. Zeros here would be indistinguishable from a genuine
+    /// zero-phase measurement.
+    #[test]
+    fn no_phase_is_reported() {
+        assert!(power_spectrum().phase_degrees().is_none());
+    }
+
+    #[test]
+    fn it_is_still_a_frequency_domain_measurement() {
+        assert_eq!(power_spectrum().bin_spacing_hz(), Some(10.0));
+        assert_eq!(power_spectrum().len(), 3);
+        assert_eq!(power_spectrum().kind(), "power_spectrum");
     }
 }
