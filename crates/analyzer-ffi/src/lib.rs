@@ -35,9 +35,13 @@ use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
 use analyzer_dsp::{
-    Averaging, DistortionConfig, Generator, Overlap, Signal, SpectrumConfig, WindowKind,
+    Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator, Overlap,
+    Signal, SpectrumConfig, WindowKind,
 };
-use analyzer_engine::{AnalysisMode, Engine, EngineConfig, rt_section};
+use analyzer_engine::{
+    AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
+    snapshot_channel,
+};
 use analyzer_model::{Measurement, MeasurementData, MeasurementId, References};
 use analyzer_plot::{
     FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
@@ -389,6 +393,211 @@ impl Default for AnalyzerSessionConfig {
     }
 }
 
+/// Most bands an equaliser can carry across the boundary.
+///
+/// Fixed so the coefficients handed to the audio thread are a plain array with
+/// no allocation behind them. Twenty-four is more than any room correction
+/// needs and more than any hardware unit this would be exported to accepts.
+pub const ANALYZER_MAX_EQ_BANDS: usize = 24;
+
+/// Shape of an equaliser band.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerFilterKind {
+    /// A bump or dip centred on the frequency.
+    #[default]
+    Peaking = 0,
+    LowShelf = 1,
+    HighShelf = 2,
+    LowPass = 3,
+    HighPass = 4,
+    BandPass = 5,
+    Notch = 6,
+    AllPass = 7,
+}
+
+impl From<AnalyzerFilterKind> for FilterKind {
+    fn from(kind: AnalyzerFilterKind) -> Self {
+        match kind {
+            AnalyzerFilterKind::Peaking => FilterKind::Peaking,
+            AnalyzerFilterKind::LowShelf => FilterKind::LowShelf,
+            AnalyzerFilterKind::HighShelf => FilterKind::HighShelf,
+            AnalyzerFilterKind::LowPass => FilterKind::LowPass,
+            AnalyzerFilterKind::HighPass => FilterKind::HighPass,
+            AnalyzerFilterKind::BandPass => FilterKind::BandPass,
+            AnalyzerFilterKind::Notch => FilterKind::Notch,
+            AnalyzerFilterKind::AllPass => FilterKind::AllPass,
+        }
+    }
+}
+
+impl From<FilterKind> for AnalyzerFilterKind {
+    fn from(kind: FilterKind) -> Self {
+        match kind {
+            FilterKind::Peaking => AnalyzerFilterKind::Peaking,
+            FilterKind::LowShelf => AnalyzerFilterKind::LowShelf,
+            FilterKind::HighShelf => AnalyzerFilterKind::HighShelf,
+            FilterKind::LowPass => AnalyzerFilterKind::LowPass,
+            FilterKind::HighPass => AnalyzerFilterKind::HighPass,
+            FilterKind::BandPass => AnalyzerFilterKind::BandPass,
+            FilterKind::Notch => AnalyzerFilterKind::Notch,
+            FilterKind::AllPass => AnalyzerFilterKind::AllPass,
+        }
+    }
+}
+
+/// One equaliser band.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerBand {
+    pub kind: AnalyzerFilterKind,
+    /// Centre or corner frequency in hertz.
+    pub hz: f32,
+    /// Gain in decibels. Ignored by the pass and reject shapes.
+    pub gain_db: f32,
+    /// Quality factor. Higher is narrower.
+    pub q: f32,
+    /// Whether the band contributes. A disabled band keeps its settings.
+    pub enabled: bool,
+}
+
+impl Default for AnalyzerBand {
+    fn default() -> Self {
+        FilterBand::default().into()
+    }
+}
+
+impl From<AnalyzerBand> for FilterBand {
+    fn from(band: AnalyzerBand) -> Self {
+        Self {
+            kind: band.kind.into(),
+            hz: band.hz,
+            gain_db: band.gain_db,
+            q: band.q,
+            enabled: band.enabled,
+        }
+    }
+}
+
+impl From<FilterBand> for AnalyzerBand {
+    fn from(band: FilterBand) -> Self {
+        Self {
+            kind: band.kind.into(),
+            hz: band.hz,
+            gain_db: band.gain_db,
+            q: band.q,
+            enabled: band.enabled,
+        }
+    }
+}
+
+/// Which equaliser is active.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerEqMode {
+    /// No equalisation. The stimulus is unfiltered and no curve is drawn.
+    #[default]
+    Off = 0,
+    /// Ten fixed octave bands, gains only.
+    Graphic = 1,
+    /// Arbitrary bands of any shape.
+    Parametric = 2,
+}
+
+/// Coefficients handed to the audio thread.
+///
+/// A plain array rather than the [`Equaliser`] itself: the equaliser owns a
+/// `Vec`, and the audio thread must never touch an allocation. `generation`
+/// lets the callback tell a change from a re-read, so it only copies
+/// coefficients when they actually moved - and it copies coefficients only,
+/// leaving each section's delay line alone so a fader move does not click.
+#[derive(Debug, Clone, Copy)]
+struct EqCoefficients {
+    generation: u64,
+    count: usize,
+    sections: [Biquad; ANALYZER_MAX_EQ_BANDS],
+    trim: f32,
+}
+
+impl Default for EqCoefficients {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            count: 0,
+            sections: [Biquad::IDENTITY; ANALYZER_MAX_EQ_BANDS],
+            trim: 1.0,
+        }
+    }
+}
+
+impl EqCoefficients {
+    fn from_equaliser(generation: u64, eq: &Equaliser) -> Self {
+        let mut out = Self {
+            generation,
+            count: 0,
+            sections: [Biquad::IDENTITY; ANALYZER_MAX_EQ_BANDS],
+            trim: 10.0_f32.powf(eq.preamp_db() / 20.0),
+        };
+        for (slot, band) in out.sections.iter_mut().zip(eq.bands()) {
+            *slot = band.design(eq.sample_rate());
+            out.count += 1;
+        }
+        out
+    }
+}
+
+/// The equaliser as the audio thread sees it.
+///
+/// Coefficients arrive through the same triple buffer the analysis frames use;
+/// the state stays here, on the audio thread, because it belongs to the running
+/// filter rather than to the settings.
+struct EqProcessor {
+    reader: SnapshotReader<EqCoefficients>,
+    sections: [Biquad; ANALYZER_MAX_EQ_BANDS],
+    count: usize,
+    trim: f32,
+    generation: u64,
+}
+
+impl EqProcessor {
+    fn new(reader: SnapshotReader<EqCoefficients>) -> Self {
+        Self {
+            reader,
+            sections: [Biquad::IDENTITY; ANALYZER_MAX_EQ_BANDS],
+            count: 0,
+            trim: 1.0,
+            generation: 0,
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32]) {
+        let latest = *self.reader.read();
+        if latest.generation != self.generation {
+            self.generation = latest.generation;
+            self.count = latest.count;
+            self.trim = latest.trim;
+            for (section, designed) in self.sections.iter_mut().zip(&latest.sections) {
+                // Coefficients only. Replacing the whole section would reset the
+                // delay line, and a filter restarted mid-signal clicks.
+                section.b0 = designed.b0;
+                section.b1 = designed.b1;
+                section.b2 = designed.b2;
+                section.a1 = designed.a1;
+                section.a2 = designed.a2;
+            }
+        }
+
+        for section in self.sections.iter_mut().take(self.count) {
+            section.process_block(samples);
+        }
+        if self.trim != 1.0 {
+            for sample in samples.iter_mut() {
+                *sample *= self.trim;
+            }
+        }
+    }
+}
+
 /// Generator settings shared with the audio callback.
 ///
 /// Atomics rather than a lock: the callback reads these on the real-time
@@ -596,6 +805,17 @@ pub struct AnalyzerSession {
     /// Axis for coherence, 0..1, over the same pixels again.
     coherence: LevelAxis,
     signal: Arc<SignalState>,
+    /// The two equalisers are both kept, so switching between them does not
+    /// throw away the one being left.
+    graphic: Equaliser,
+    parametric: Equaliser,
+    eq_mode: AnalyzerEqMode,
+    eq_publisher: SnapshotPublisher<EqCoefficients>,
+    eq_generation: u64,
+    /// Centre frequency of each pixel column, for evaluating the equaliser.
+    /// Rebuilt only when the geometry changes.
+    column_hz: Vec<f32>,
+    eq_trace: Trace,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -808,6 +1028,9 @@ fn start_session(
         config.signal_hz,
     ));
 
+    let (eq_publisher, eq_reader) = snapshot_channel(EqCoefficients::default());
+    let mut equaliser = EqProcessor::new(eq_reader);
+
     let mut generator = Generator::new(rate as f32, signal.signal(), GENERATOR_SEED);
     let mut stimulus = vec![0.0_f32; MAX_CALLBACK_FRAMES];
     // Only allocated when the reference has to be spliced in; the common
@@ -841,6 +1064,12 @@ fn start_session(
                     let stimulus = stimulus.get_mut(..frames).unwrap_or_default();
                     if playing {
                         generator.fill(stimulus);
+                        // Equalise before anything sees it, so the reference
+                        // channel carries what was actually played. Filtering
+                        // only the output would make the transfer function
+                        // report the equaliser's own curve as if it were the
+                        // room's.
+                        equaliser.process(stimulus);
                     } else {
                         stimulus.fill(0.0);
                     }
@@ -906,6 +1135,13 @@ fn start_session(
         phase: LevelAxis::new(-180.0, 180.0, 600.0),
         coherence: LevelAxis::new(0.0, 1.0, 600.0),
         signal,
+        graphic: Equaliser::graphic(rate as f32),
+        parametric: Equaliser::parametric(rate as f32),
+        eq_mode: AnalyzerEqMode::Off,
+        eq_publisher,
+        eq_generation: 0,
+        column_hz: Vec::new(),
+        eq_trace: Trace::default(),
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -978,6 +1214,7 @@ pub unsafe extern "C" fn analyzer_session_set_plot(
         // a UI cannot accidentally clip either.
         session.phase = LevelAxis::new(-180.0, 180.0, height_px);
         session.coherence = LevelAxis::new(0.0, 1.0, height_px);
+        session.column_hz.clear();
         session.reduction = reduction.into();
         session.columns = width_px.round().max(1.0) as usize;
         true
@@ -1238,6 +1475,461 @@ pub unsafe extern "C" fn analyzer_session_set_signal(
     guard(false, || {
         unsafe { &*session }.signal.set(signal, level_db, hz);
         true
+    })
+}
+
+impl AnalyzerSession {
+    /// The equaliser the current mode selects.
+    fn equaliser(&self) -> Option<&Equaliser> {
+        match self.eq_mode {
+            AnalyzerEqMode::Off => None,
+            AnalyzerEqMode::Graphic => Some(&self.graphic),
+            AnalyzerEqMode::Parametric => Some(&self.parametric),
+        }
+    }
+
+    fn equaliser_mut(&mut self) -> Option<&mut Equaliser> {
+        match self.eq_mode {
+            AnalyzerEqMode::Off => None,
+            AnalyzerEqMode::Graphic => Some(&mut self.graphic),
+            AnalyzerEqMode::Parametric => Some(&mut self.parametric),
+        }
+    }
+
+    /// Push the active equaliser's coefficients to the audio thread.
+    ///
+    /// Called after every change. Cheap - a couple of dozen biquad designs -
+    /// and it happens on a UI event, not per frame.
+    fn publish_eq(&mut self) {
+        self.eq_generation += 1;
+        let generation = self.eq_generation;
+        let coefficients = match self.equaliser() {
+            Some(eq) => EqCoefficients::from_equaliser(generation, eq),
+            None => EqCoefficients {
+                generation,
+                ..EqCoefficients::default()
+            },
+        };
+        self.eq_publisher.publish_with(|slot| *slot = coefficients);
+    }
+
+    /// Centre frequency of every pixel column, cached.
+    fn columns_hz(&mut self, columns: usize) -> &[f32] {
+        if self.column_hz.len() != columns {
+            self.column_hz.clear();
+            let width = self.frequency.width();
+            self.column_hz.extend((0..columns).map(|index| {
+                // The column centre, matching where `reduce` samples, so an
+                // equaliser curve and a measured curve line up.
+                let x = (index as f32 + 0.5) * width / columns as f32;
+                self.frequency.x_to_freq(x)
+            }));
+        }
+        &self.column_hz
+    }
+}
+
+/// Choose which equaliser is active. Returns false for a null session.
+///
+/// Both equalisers are kept across a switch, so moving to the parametric and
+/// back does not lose the graphic's fader positions.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_set_eq_mode(
+    session: *mut AnalyzerSession,
+    mode: AnalyzerEqMode,
+) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        session.eq_mode = mode;
+        session.publish_eq();
+        true
+    })
+}
+
+/// Bands the active equaliser has. Zero when it is off.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_band_count(session: *const AnalyzerSession) -> usize {
+    if session.is_null() {
+        return 0;
+    }
+    guard(0, || {
+        unsafe { &*session }
+            .equaliser()
+            .map_or(0, |eq| eq.bands().len())
+    })
+}
+
+/// Read one band.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_get_band(
+    session: *const AnalyzerSession,
+    index: usize,
+    out: *mut AnalyzerBand,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let Some(band) = unsafe { &*session }
+            .equaliser()
+            .and_then(|eq| eq.bands().get(index).copied())
+        else {
+            return false;
+        };
+        unsafe { *out = band.into() };
+        true
+    })
+}
+
+/// Replace one band.
+///
+/// # Safety
+///
+/// `session` must be null or live; `band` must be null or readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_set_band(
+    session: *mut AnalyzerSession,
+    index: usize,
+    band: *const AnalyzerBand,
+) -> bool {
+    if session.is_null() || band.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let band: FilterBand = unsafe { *band }.into();
+        if !band.hz.is_finite() || !band.gain_db.is_finite() || !band.q.is_finite() {
+            return false;
+        }
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        if index >= eq.bands().len() {
+            return false;
+        }
+        eq.set_band(index, band);
+        session.publish_eq();
+        true
+    })
+}
+
+/// Set one band's gain, which is all a graphic equaliser can change.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_set_gain(
+    session: *mut AnalyzerSession,
+    index: usize,
+    gain_db: f32,
+) -> bool {
+    if session.is_null() || !gain_db.is_finite() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        if index >= eq.bands().len() {
+            return false;
+        }
+        eq.set_gain_db(index, gain_db);
+        session.publish_eq();
+        true
+    })
+}
+
+/// Append a band to the parametric equaliser. Returns its index, or -1.
+///
+/// # Safety
+///
+/// `session` must be null or live; `band` must be null or readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_add_band(
+    session: *mut AnalyzerSession,
+    band: *const AnalyzerBand,
+) -> isize {
+    if session.is_null() || band.is_null() {
+        return -1;
+    }
+    guard(-1, || {
+        let band: FilterBand = unsafe { *band }.into();
+        if !band.hz.is_finite() || !band.gain_db.is_finite() || !band.q.is_finite() {
+            return -1;
+        }
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return -1;
+        };
+        // The audio thread's coefficient array is fixed, so a band beyond it
+        // would silently not be heard. Refusing is the honest answer.
+        if eq.bands().len() >= ANALYZER_MAX_EQ_BANDS {
+            return -1;
+        }
+        let index = eq.push_band(band);
+        session.publish_eq();
+        index as isize
+    })
+}
+
+/// Remove a band from the parametric equaliser.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_remove_band(
+    session: *mut AnalyzerSession,
+    index: usize,
+) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        if index >= eq.bands().len() {
+            return false;
+        }
+        eq.remove_band(index);
+        session.publish_eq();
+        true
+    })
+}
+
+/// Set every gain to zero and clear the trim.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_flatten(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        eq.flatten();
+        session.publish_eq();
+        true
+    })
+}
+
+/// Trim the output so the equaliser's loudest point sits at unity.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_trim(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        eq.trim_to_unity();
+        session.publish_eq();
+        true
+    })
+}
+
+/// Set the output trim by hand, in decibels.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_set_preamp(
+    session: *mut AnalyzerSession,
+    db: f32,
+) -> bool {
+    if session.is_null() || !db.is_finite() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(eq) = session.equaliser_mut() else {
+            return false;
+        };
+        eq.set_preamp_db(db);
+        session.publish_eq();
+        true
+    })
+}
+
+/// Headroom figures for the active equaliser.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerEqInfo {
+    /// Bands the active equaliser holds.
+    pub band_count: usize,
+    /// Largest gain applied anywhere in the audio band, in decibels.
+    ///
+    /// Bands add, so this can far exceed any single band's gain. A UI showing
+    /// it next to a trim control is the difference between an equaliser that is
+    /// safe to use and one that clips without saying so.
+    pub peak_gain_db: f32,
+    /// Output trim, in decibels.
+    pub preamp_db: f32,
+    /// Whether an equaliser is active at all.
+    pub active: bool,
+}
+
+/// Read the active equaliser's headroom.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_eq_info(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerEqInfo,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let info = match unsafe { &*session }.equaliser() {
+            Some(eq) => AnalyzerEqInfo {
+                band_count: eq.bands().len(),
+                peak_gain_db: eq.peak_gain_db(),
+                preamp_db: eq.preamp_db(),
+                active: true,
+            },
+            None => AnalyzerEqInfo::default(),
+        };
+        unsafe { *out = info };
+        true
+    })
+}
+
+/// Copy the equaliser's own curve, one value per pixel column, in decibels.
+///
+/// Pass `band` of -1 for the combined curve, or a band index for that band
+/// alone. Returns zero when no equaliser is active.
+///
+/// This is arithmetic on the coefficients, not a measurement: it works whether
+/// or not audio is running, which is what makes designing a correction against
+/// a saved measurement possible.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or point to at least
+/// `capacity` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_eq_curve(
+    session: *mut AnalyzerSession,
+    band: isize,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        if session.equaliser().is_none() {
+            return 0;
+        }
+        let columns = session.columns.min(capacity);
+        session.columns_hz(columns);
+
+        session.eq_trace.points.clear();
+        session.eq_trace.points.reserve(columns);
+        // Split the borrow: the curve reads the equaliser while the cache is
+        // read and the trace is written.
+        let (graphic, parametric) = (&session.graphic, &session.parametric);
+        let eq = match session.eq_mode {
+            AnalyzerEqMode::Off => return 0,
+            AnalyzerEqMode::Graphic => graphic,
+            AnalyzerEqMode::Parametric => parametric,
+        };
+        for hz in session.column_hz.iter().take(columns) {
+            session.eq_trace.points.push(if band < 0 {
+                eq.magnitude_db_at(*hz)
+            } else {
+                eq.band_magnitude_db_at(band as usize, *hz)
+            });
+        }
+
+        let written = session.eq_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.eq_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+/// Copy the measured trace with the equaliser applied.
+///
+/// The point of an equaliser in a measurement tool: what the room would look
+/// like after the correction, drawn beside what it looks like now. Adding
+/// decibels is exact here because the equaliser's curve is known analytically
+/// rather than measured.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or point to at least
+/// `capacity` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_corrected(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        if session.equaliser().is_none() {
+            return 0;
+        }
+        // SAFETY: caller guarantees `capacity` writable floats.
+        let written = unsafe { copy_reduced(session, out, capacity, Which::Live) };
+        if written == 0 {
+            return 0;
+        }
+        session.columns_hz(written);
+
+        let (graphic, parametric) = (&session.graphic, &session.parametric);
+        let eq = match session.eq_mode {
+            AnalyzerEqMode::Off => return 0,
+            AnalyzerEqMode::Graphic => graphic,
+            AnalyzerEqMode::Parametric => parametric,
+        };
+        for (index, hz) in session.column_hz.iter().take(written).enumerate() {
+            // SAFETY: index < written <= capacity.
+            unsafe {
+                let slot = out.add(index);
+                *slot += eq.magnitude_db_at(*hz);
+            }
+        }
+        written
     })
 }
 
@@ -1833,6 +2525,39 @@ mod tests {
                 -20.0,
                 1000.0
             ));
+            assert!(!analyzer_session_set_eq_mode(
+                ptr::null_mut(),
+                AnalyzerEqMode::Graphic
+            ));
+            assert_eq!(analyzer_session_eq_band_count(ptr::null()), 0);
+            assert!(!analyzer_session_eq_get_band(
+                ptr::null(),
+                0,
+                ptr::null_mut()
+            ));
+            assert!(!analyzer_session_eq_set_band(
+                ptr::null_mut(),
+                0,
+                ptr::null()
+            ));
+            assert!(!analyzer_session_eq_set_gain(ptr::null_mut(), 0, 0.0));
+            assert_eq!(
+                analyzer_session_eq_add_band(ptr::null_mut(), ptr::null()),
+                -1
+            );
+            assert!(!analyzer_session_eq_remove_band(ptr::null_mut(), 0));
+            assert!(!analyzer_session_eq_flatten(ptr::null_mut()));
+            assert!(!analyzer_session_eq_trim(ptr::null_mut()));
+            assert!(!analyzer_session_eq_set_preamp(ptr::null_mut(), 0.0));
+            assert!(!analyzer_session_eq_info(ptr::null(), ptr::null_mut()));
+            assert_eq!(
+                analyzer_session_copy_eq_curve(ptr::null_mut(), -1, ptr::null_mut(), 0),
+                0
+            );
+            assert_eq!(
+                analyzer_session_copy_corrected(ptr::null_mut(), ptr::null_mut(), 0),
+                0
+            );
             assert!(analyzer_phase_to_y(ptr::null(), 0.0).is_nan());
             assert!(analyzer_coherence_to_y(ptr::null(), 0.0).is_nan());
             assert!(!analyzer_session_has_new_frame(ptr::null()));
@@ -1948,6 +2673,64 @@ mod tests {
         assert!(
             config.signal_level_db <= -12.0,
             "the default stimulus level must be quiet enough not to damage anything"
+        );
+    }
+
+    /// The coefficients handed to the audio thread must describe the same
+    /// filter the equaliser does, or what is heard and what is drawn diverge.
+    #[test]
+    fn published_coefficients_match_the_equaliser() {
+        let mut eq = Equaliser::graphic(48_000.0);
+        eq.set_gain_db(5, 6.0);
+        eq.set_preamp_db(-6.0);
+
+        let coefficients = EqCoefficients::from_equaliser(1, &eq);
+        assert_eq!(coefficients.count, 10);
+        assert!(
+            (coefficients.trim - 0.501_187).abs() < 1e-4,
+            "-6 dB is 0.5012"
+        );
+
+        let section = coefficients.sections[5];
+        let expected = eq.bands()[5].design(48_000.0);
+        assert_eq!(section.b0, expected.b0);
+        assert_eq!(section.a1, expected.a1);
+    }
+
+    /// An equaliser with more bands than the array holds must not overflow it.
+    #[test]
+    fn publishing_stops_at_the_array_bound() {
+        let bands = (0..ANALYZER_MAX_EQ_BANDS + 8)
+            .map(|i| FilterBand::peaking(100.0 + i as f32 * 100.0, 3.0, 2.0))
+            .collect();
+        let eq = Equaliser::new(48_000.0, bands);
+        let coefficients = EqCoefficients::from_equaliser(1, &eq);
+        assert_eq!(coefficients.count, ANALYZER_MAX_EQ_BANDS);
+    }
+
+    /// The processor must apply what was published, and must pick up a change.
+    #[test]
+    fn the_processor_follows_the_published_coefficients() {
+        let (mut publisher, reader) = snapshot_channel(EqCoefficients::default());
+        let mut processor = EqProcessor::new(reader);
+
+        // Nothing published yet: a pass-through.
+        let mut samples = vec![1.0_f32, 0.0, 0.0, 0.0];
+        processor.process(&mut samples);
+        assert_eq!(samples[0], 1.0);
+
+        // A pure trim is the easiest thing to check exactly.
+        let mut eq = Equaliser::parametric(48_000.0);
+        eq.set_preamp_db(-6.0);
+        let coefficients = EqCoefficients::from_equaliser(1, &eq);
+        publisher.publish_with(|slot| *slot = coefficients);
+
+        let mut samples = vec![1.0_f32, 0.0, 0.0, 0.0];
+        processor.process(&mut samples);
+        assert!(
+            (samples[0] - 0.501_187).abs() < 1e-4,
+            "the trim was not applied, got {}",
+            samples[0]
         );
     }
 
