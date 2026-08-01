@@ -19,6 +19,7 @@
 //! figure. Without that, meters and spectrum would disagree by 3 dB about the
 //! same signal, which is exactly the sort of discrepancy that costs an afternoon.
 
+use crate::biquad::Biquad;
 use crate::window::WindowKind;
 
 /// RMS of a full-scale sine, the reference for 0 dBFS.
@@ -73,102 +74,6 @@ impl Integration {
             }
         }
     }
-}
-
-/// A single biquad in transposed direct form II.
-#[derive(Debug, Clone, Copy, Default)]
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    s1: f32,
-    s2: f32,
-}
-
-impl Biquad {
-    fn process(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.s1;
-        self.s1 = self.b1 * x - self.a1 * y + self.s2;
-        self.s2 = self.b2 * x - self.a2 * y;
-        y
-    }
-
-    fn reset(&mut self) {
-        self.s1 = 0.0;
-        self.s2 = 0.0;
-    }
-
-    /// Magnitude response at `hz`, for normalising a cascade.
-    fn magnitude_at(&self, hz: f32, sample_rate: f32) -> f32 {
-        let w = std::f32::consts::TAU * hz / sample_rate;
-        let (sin1, cos1) = w.sin_cos();
-        let (sin2, cos2) = (2.0 * w).sin_cos();
-        let num_re = self.b0 + self.b1 * cos1 + self.b2 * cos2;
-        let num_im = -(self.b1 * sin1 + self.b2 * sin2);
-        let den_re = 1.0 + self.a1 * cos1 + self.a2 * cos2;
-        let den_im = -(self.a1 * sin1 + self.a2 * sin2);
-        let num = (num_re * num_re + num_im * num_im).sqrt();
-        let den = (den_re * den_re + den_im * den_im).sqrt();
-        if den > 0.0 { num / den } else { 0.0 }
-    }
-
-    /// Two zeros at DC and a double pole at `omega`, bilinear-transformed.
-    ///
-    /// `H(s) = s² / (s + ω)²`, which is the building block both weighting curves
-    /// are made of.
-    fn double_pole_highpass(omega: f32, sample_rate: f32) -> Self {
-        let c = 2.0 * sample_rate;
-        let omega = prewarp(omega, sample_rate);
-        let a = c + omega;
-        let b = omega - c;
-        let gain = (c * c) / (a * a);
-        Self {
-            b0: gain,
-            b1: -2.0 * gain,
-            b2: gain,
-            a1: 2.0 * b / a,
-            a2: (b * b) / (a * a),
-            s1: 0.0,
-            s2: 0.0,
-        }
-    }
-
-    /// Two real poles and two zeros at Nyquist, bilinear-transformed.
-    ///
-    /// `H(s) = 1 / ((s + ω₁)(s + ω₂))`.
-    fn two_pole_lowpass(omega_a: f32, omega_b: f32, sample_rate: f32) -> Self {
-        let c = 2.0 * sample_rate;
-        let omega_a = prewarp(omega_a, sample_rate);
-        let omega_b = prewarp(omega_b, sample_rate);
-        let (pa, qa) = (c + omega_a, omega_a - c);
-        let (pb, qb) = (c + omega_b, omega_b - c);
-        let norm = pa * pb;
-        Self {
-            b0: 1.0 / norm,
-            b1: 2.0 / norm,
-            b2: 1.0 / norm,
-            a1: (pa * qb + pb * qa) / norm,
-            a2: (qa * qb) / norm,
-            s1: 0.0,
-            s2: 0.0,
-        }
-    }
-}
-
-/// Pre-warp an analog pole so the bilinear transform lands it on the intended
-/// digital frequency.
-///
-/// The bilinear transform compresses the frequency axis towards Nyquist. The
-/// 12194 Hz pole is halfway there at a 48 kHz sample rate, so without this it
-/// ends up well below where it belongs and C-weighting reads about 0.6 dB low at
-/// 8 kHz - inside the class 1 tolerance, but wrong for no good reason.
-fn prewarp(omega: f32, sample_rate: f32) -> f32 {
-    let c = 2.0 * sample_rate;
-    // Guard against the tangent blowing up for a pole at or beyond Nyquist.
-    let normalised = (omega / c).clamp(0.0, 1.55);
-    c * normalised.tan()
 }
 
 /// Pole frequencies from IEC 61672-1, in radians per second.

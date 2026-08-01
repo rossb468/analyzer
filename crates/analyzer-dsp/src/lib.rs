@@ -13,9 +13,11 @@
 //! callback with a hard deadline, and an allocation with an unbounded worst case
 //! eventually surfaces as a dropped block and a silently corrupted measurement.
 
+pub mod biquad;
 pub mod deconv;
 pub mod delay;
 pub mod distortion;
+pub mod eq;
 pub mod fft;
 pub mod generator;
 pub mod ir;
@@ -26,9 +28,11 @@ pub mod spectrum;
 pub mod transfer;
 pub mod window;
 
+pub use biquad::Biquad;
 pub use deconv::{Deconvolver, ImpulseResponse};
 pub use delay::{DelayEstimate, DelayFinder};
 pub use distortion::{Distortion, DistortionConfig, Harmonic};
+pub use eq::{Equaliser, FilterBand, FilterKind, OCTAVE_CENTRES, OCTAVE_Q};
 pub use fft::{Fft, RealFft};
 pub use generator::{Generator, Signal};
 pub use ir::{Gate, GatedResponse, ReverbTime, gated_response, reverb_time, schroeder_decay};
