@@ -78,6 +78,58 @@ struct TransferInfo {
     }
 }
 
+/// One equaliser band, as Swift sees it.
+struct EqBand: Identifiable, Equatable {
+    /// Position in the equaliser. Stable for as long as no band is removed,
+    /// which is all SwiftUI needs to animate a list.
+    let id: Int
+    var kind: AnalyzerFilterKind
+    var hz: Float
+    var gainDb: Float
+    var q: Float
+    var enabled: Bool
+
+    /// Whether gain means anything for this shape. A pass or reject filter
+    /// ignores it, and a UI should say so rather than offer a dead control.
+    var usesGain: Bool {
+        kind == AnalyzerFilterKind_Peaking
+            || kind == AnalyzerFilterKind_LowShelf
+            || kind == AnalyzerFilterKind_HighShelf
+    }
+
+    var kindLabel: String {
+        switch kind {
+        case AnalyzerFilterKind_Peaking: "PK"
+        case AnalyzerFilterKind_LowShelf: "LS"
+        case AnalyzerFilterKind_HighShelf: "HS"
+        case AnalyzerFilterKind_LowPass: "LP"
+        case AnalyzerFilterKind_HighPass: "HP"
+        case AnalyzerFilterKind_BandPass: "BP"
+        case AnalyzerFilterKind_Notch: "NO"
+        default: "AP"
+        }
+    }
+
+    var raw: AnalyzerBand {
+        AnalyzerBand(kind: kind, hz: hz, gain_db: gainDb, q: q, enabled: enabled)
+    }
+}
+
+/// Headroom of the active equaliser.
+struct EqInfo {
+    let bandCount: Int
+    /// Largest gain anywhere in the band. Bands add, so this routinely exceeds
+    /// any single band's setting.
+    let peakGainDb: Float
+    let preampDb: Float
+    let active: Bool
+
+    /// Whether the equaliser is asking for more than unity and has not been
+    /// trimmed for it. Anything above this clips before it reaches the
+    /// converter, and silence is the wrong way to find that out.
+    var clips: Bool { active && peakGainDb > 0.1 }
+}
+
 /// A gridline.
 struct GridTick {
     let value: Float
@@ -312,6 +364,122 @@ final class AnalyzerSessionHandle {
     func y(forCoherence value: Float) -> Float {
         guard let handle else { return .nan }
         return analyzer_coherence_to_y(handle, value)
+    }
+
+    private var eqCurveStorage: [Float] = []
+    private var correctedStorage: [Float] = []
+
+    /// Choose which equaliser is active.
+    func setEqMode(_ mode: AnalyzerEqMode) {
+        guard let handle else { return }
+        _ = analyzer_session_set_eq_mode(handle, mode)
+    }
+
+    /// Read every band of the active equaliser.
+    func eqBands() -> [EqBand] {
+        guard let handle else { return [] }
+        let count = Int(analyzer_session_eq_band_count(handle))
+        var bands: [EqBand] = []
+        bands.reserveCapacity(count)
+        for index in 0..<count {
+            var raw = AnalyzerBand()
+            guard analyzer_session_eq_get_band(handle, UInt(index), &raw) else { continue }
+            bands.append(
+                EqBand(
+                    id: index,
+                    kind: raw.kind,
+                    hz: raw.hz,
+                    gainDb: raw.gain_db,
+                    q: raw.q,
+                    enabled: raw.enabled
+                )
+            )
+        }
+        return bands
+    }
+
+    @discardableResult
+    func setEqBand(_ index: Int, _ band: EqBand) -> Bool {
+        guard let handle else { return false }
+        var raw = band.raw
+        return analyzer_session_eq_set_band(handle, UInt(index), &raw)
+    }
+
+    @discardableResult
+    func setEqGain(_ index: Int, _ gainDb: Float) -> Bool {
+        guard let handle else { return false }
+        return analyzer_session_eq_set_gain(handle, UInt(index), gainDb)
+    }
+
+    /// Append a band. Returns its index, or nil when the equaliser is full.
+    @discardableResult
+    func addEqBand(_ band: EqBand) -> Int? {
+        guard let handle else { return nil }
+        var raw = band.raw
+        let index = analyzer_session_eq_add_band(handle, &raw)
+        return index < 0 ? nil : Int(index)
+    }
+
+    @discardableResult
+    func removeEqBand(_ index: Int) -> Bool {
+        guard let handle else { return false }
+        return analyzer_session_eq_remove_band(handle, UInt(index))
+    }
+
+    func flattenEq() {
+        guard let handle else { return }
+        _ = analyzer_session_eq_flatten(handle)
+    }
+
+    /// Trim the output so the equaliser's loudest point sits at unity.
+    func trimEq() {
+        guard let handle else { return }
+        _ = analyzer_session_eq_trim(handle)
+    }
+
+    func setEqPreamp(_ db: Float) {
+        guard let handle else { return }
+        _ = analyzer_session_eq_set_preamp(handle, db)
+    }
+
+    var eqInfo: EqInfo? {
+        guard let handle else { return nil }
+        var raw = AnalyzerEqInfo()
+        guard analyzer_session_eq_info(handle, &raw) else { return nil }
+        return EqInfo(
+            bandCount: Int(raw.band_count),
+            peakGainDb: raw.peak_gain_db,
+            preampDb: raw.preamp_db,
+            active: raw.active
+        )
+    }
+
+    /// Copy the equaliser's own curve. Pass a band index for one band alone.
+    func copyEqCurve(columns: Int, band: Int? = nil) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if eqCurveStorage.count < columns {
+            eqCurveStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = eqCurveStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(
+                analyzer_session_copy_eq_curve(handle, band.map { Int($0) } ?? -1, base, UInt(columns))
+            )
+        }
+        return eqCurveStorage[0..<written]
+    }
+
+    /// Copy the measured trace with the equaliser applied.
+    func copyCorrected(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if correctedStorage.count < columns {
+            correctedStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = correctedStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_corrected(handle, base, UInt(columns)))
+        }
+        return correctedStorage[0..<written]
     }
 
     /// Restart the long-term average without disturbing the live trace.

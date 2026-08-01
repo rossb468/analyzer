@@ -25,6 +25,15 @@ final class AnalyzerModel: ObservableObject {
     /// State of the transfer function, or nil when none is running.
     @Published var transfer: TransferInfo?
 
+    /// Which equaliser is active.
+    @Published var eqMode: AnalyzerEqMode = AnalyzerEqMode_Off { didSet { applyEqMode() } }
+    /// Bands of the active equaliser, mirrored for the UI to bind against.
+    @Published var eqBands: [EqBand] = []
+    /// Headroom of the active equaliser.
+    @Published var eqInfo: EqInfo?
+    /// Whether the corrected trace - measurement plus equaliser - is drawn.
+    @Published var showCorrected = true
+
     /// What the session computes. Changing this restarts it, because the
     /// transfer function needs a second channel and possibly an output.
     @Published var mode: AnalyzerMode = AnalyzerMode_Spectrum { didSet { restartIfRunning() } }
@@ -150,6 +159,9 @@ final class AnalyzerModel: ObservableObject {
             deviceName = handle.deviceName
             isRunning = true
             errorMessage = nil
+            // The core starts every session with the equaliser off, so the
+            // mode has to be re-applied rather than assumed to survive.
+            applyEqMode()
         } catch {
             // The most common failure by far is microphone permission, and the
             // Rust side already explains that case in detail rather than just
@@ -169,6 +181,64 @@ final class AnalyzerModel: ObservableObject {
     /// Measure the reference-to-measurement delay and remove it.
     func findDelay() {
         session?.estimateDelay()
+    }
+
+    // ------------------------------------------------------------ equaliser -
+
+    /// Push the mode to the core and pull back whatever bands it now has.
+    ///
+    /// The core owns the bands; this list is a mirror. Editing the mirror and
+    /// hoping the two stay in step is how a fader ends up controlling the wrong
+    /// filter.
+    private func applyEqMode() {
+        session?.setEqMode(eqMode)
+        refreshEq()
+    }
+
+    func refreshEq() {
+        eqBands = session?.eqBands() ?? []
+        eqInfo = session?.eqInfo
+    }
+
+    func setEqGain(_ index: Int, _ gainDb: Float) {
+        session?.setEqGain(index, gainDb)
+        refreshEq()
+    }
+
+    func setEqBand(_ index: Int, _ band: EqBand) {
+        session?.setEqBand(index, band)
+        refreshEq()
+    }
+
+    func addEqBand() {
+        guard session?.addEqBand(EqBand(
+            id: 0,
+            kind: AnalyzerFilterKind_Peaking,
+            hz: 1000,
+            gainDb: 0,
+            q: 4,
+            enabled: true
+        )) != nil else {
+            errorMessage = "The equaliser is full."
+            return
+        }
+        refreshEq()
+    }
+
+    func removeEqBand(_ index: Int) {
+        session?.removeEqBand(index)
+        refreshEq()
+    }
+
+    func flattenEq() {
+        session?.flattenEq()
+        refreshEq()
+    }
+
+    /// Trim the output so the equaliser's loudest point sits at unity.
+    func trimEq() {
+        session?.trimEq()
+        refreshEq()
     }
 
     /// A stimulus turning on or off changes whether an output stream exists,
@@ -302,6 +372,21 @@ struct SpectrumView: NSViewRepresentable {
                     guard self.model.showAverage else { return [][...] }
                     return session.copyAverage(columns: columns)
                 },
+                // The equaliser's own curve, on the same decibel axis as
+                // everything else so a 6 dB cut looks like 6 dB.
+                layer(colour: SIMD4(0.95, 0.35, 0.55, 0.85), range: levelRange) { session, columns in
+                    guard self.model.eqMode != AnalyzerEqMode_Off else { return [][...] }
+                    return session.copyEqCurve(columns: columns)
+                },
+                // What the measurement would look like corrected. The whole
+                // reason an equaliser belongs in a measurement tool.
+                layer(colour: SIMD4(0.4, 0.75, 1.0, 0.9), range: levelRange) { session, columns in
+                    guard self.model.eqMode != AnalyzerEqMode_Off,
+                          self.model.showCorrected,
+                          self.model.mode == AnalyzerMode_Spectrum
+                    else { return [][...] }
+                    return session.copyCorrected(columns: columns)
+                },
                 // The main curve, and the one that carries the per-frame
                 // bookkeeping: it is drawn every frame and the others are not.
                 layer(colour: SIMD4(0.35, 0.85, 0.45, 1.0), range: levelRange) { session, columns in
@@ -405,6 +490,9 @@ struct ContentView: View {
             Divider()
             transferBar
             plot
+            if model.eqMode != AnalyzerEqMode_Off {
+                EqualiserView(model: model)
+            }
             Divider()
             statusBar
         }
@@ -552,6 +640,16 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 150)
+
+            Picker("EQ", selection: $model.eqMode) {
+                Text("Off").tag(AnalyzerEqMode_Off)
+                Text("Graphic").tag(AnalyzerEqMode_Graphic)
+                Text("Parametric").tag(AnalyzerEqMode_Parametric)
+            }
+            .frame(width: 160)
+            .help("""
+                The equaliser is drawn against the measurement and applied to the                 generator, so the corrected curve is a prediction you can also hear.
+                """)
 
             generator
 
