@@ -5,7 +5,9 @@ members = ["crates/*", "tools/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+# Let-chains (`if let ... && ...`, used in the CoreAudio backend) stabilised
+# here. CI builds on stable, so it will not catch a claim lower than this.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Ross Bower <rossbower@icloud.com>"]
 

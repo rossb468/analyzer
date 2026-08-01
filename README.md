@@ -4,9 +4,10 @@ A native real-time audio and acoustic measurement tool. Rust core, native UI per
 platform, macOS first.
 
 > **Status: pre-alpha.** The DSP core, audio backend and macOS app all build and
-> run. Live capture needs a one-time microphone permission grant that has not
-> been given on the development machine yet, so it is written and unverified
-> against real hardware. `analyzer` is a working name.
+> run, and live capture is verified against real hardware. The real-time
+> analyzer, the dual-FFT transfer function and both equalisers work end to end.
+> Nothing has been checked against REW's own numbers yet. `analyzer` is a
+> working name.
 
 ## Why
 
@@ -34,16 +35,19 @@ starts with.
 | Level meters | Peak, RMS, LEQ; A/C/Z weighting; fast/slow/impulse |
 | Octave bands | IEC 61260, 1/1 through 1/48 |
 | Calibration | dBFS to dB SPL, mic curves, weighting |
+| Harmonic distortion | THD, THD+N, per-order harmonics, Nyquist-aware |
+| Biquads | RBJ cookbook: peaking, shelves, pass, notch, allpass |
+| Equalisers | 10-band graphic on ISO octaves, and free parametric |
 | Sweep deconvolution | Regularised, recovering an impulse response |
 | Impulse analysis | Gating, gated response, Schroeder decay, EDT/T20/T30 |
 | Measurement model | Types, store, versioned file format, REW text export |
-| CoreAudio backend | Enumeration verified; capture pending a permission grant |
+| CoreAudio backend | Capture and playback, aggregate devices, verified live |
 | Engine | Lock-free ring, analysis thread, snapshot publication |
-| macOS app | SwiftUI shell, Metal spectrum renderer (RTA only so far) |
+| macOS app | RTA, transfer function, generator, equaliser, save and export |
 
 ## Building
 
-Needs Rust 1.87 or newer, and Xcode for the macOS app.
+Needs Rust 1.88 or newer — let-chains — and Xcode for the macOS app.
 
 ```bash
 ./check.sh
@@ -183,6 +187,19 @@ away: no application logic lives in Swift, `AudioBackend` and `Fft` are traits
 with one implementation each, and no Apple SDK type appears outside
 `apps/macos/` and one `cfg(target_os = "macos")` module.
 
+## Not done yet
+
+The plan's own exit criterion for the headless core is a numeric match against
+REW: ±0.1 dB on synthetic signals and ±0.5 dB on a real measurement, 20 Hz to
+20 kHz. **That comparison has not been run.** Internal consistency is verified
+against analytically known answers throughout, which is a different and weaker
+claim.
+
+Also outstanding: scope view, trace capture and overlay, the running
+spectrogram, group delay, minimum-phase decomposition, target curves, an
+automatic PEQ optimiser, filter export to hardware, and the Windows and Linux
+clients.
+
 ## A note on microphone permission
 
 macOS gates capture behind TCC, and it will not raise a permission prompt for a
@@ -190,6 +207,11 @@ process launched in a non-interactive background session — it refuses outright
 and CoreAudio then stalls for minutes before failing. Run the app or the CLI once
 from a foreground Terminal window, or grant access under System Settings →
 Privacy & Security → Microphone. Device enumeration works without it.
+
+Playing a stimulus and capturing it at once needs both directions on **one**
+device, because a CoreAudio IOProc belongs to one device and two devices means
+two clocks. A laptop's built-in input and output are separate devices, so build
+an aggregate device in Audio MIDI Setup and select that.
 
 ## Licence
 
