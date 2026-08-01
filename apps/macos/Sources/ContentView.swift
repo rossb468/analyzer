@@ -22,6 +22,28 @@ final class AnalyzerModel: ObservableObject {
     /// Most recent distortion reading, or nil when no tone stands clear of the
     /// noise floor.
     @Published var distortion: DistortionReading?
+    /// State of the transfer function, or nil when none is running.
+    @Published var transfer: TransferInfo?
+
+    /// What the session computes. Changing this restarts it, because the
+    /// transfer function needs a second channel and possibly an output.
+    @Published var mode: AnalyzerMode = AnalyzerMode_Spectrum { didSet { restartIfRunning() } }
+    @Published var reference: AnalyzerReference = AnalyzerReference_Internal {
+        didSet { restartIfRunning() }
+    }
+    @Published var referenceChannel: UInt32 = 1 { didSet { restartIfRunning() } }
+    /// Whether phase is drawn over the magnitude.
+    @Published var showPhase = false
+    /// Whether coherence is drawn over the magnitude.
+    @Published var showCoherence = true
+
+    /// Stimulus. Changing the signal itself needs a restart only when it turns
+    /// the output on or off; level and frequency are live.
+    @Published var signal: AnalyzerSignal = AnalyzerSignal_Silence {
+        didSet { signalChanged(wasSilent: oldValue == AnalyzerSignal_Silence) }
+    }
+    @Published var signalLevelDb: Float = -20 { didSet { pushSignal() } }
+    @Published var signalHz: Float = 1000 { didSet { pushSignal() } }
 
     @Published var fftSize: UInt32 = 4096 { didSet { restartIfRunning() } }
     @Published var window: AnalyzerWindow = AnalyzerWindow_Hann { didSet { restartIfRunning() } }
@@ -40,6 +62,46 @@ final class AnalyzerModel: ObservableObject {
     let maxDb: Float = 0
 
     private(set) var session: AnalyzerSessionHandle?
+
+    /// Whether the selected device can play a stimulus.
+    ///
+    /// CoreAudio drives one device from one IOProc, so playing and capturing
+    /// together means one device doing both. A laptop's built-in input and
+    /// output are separate devices, which is why this is so often false and why
+    /// the answer is an aggregate device in Audio MIDI Setup.
+    var canPlay: Bool {
+        devices.first { $0.uid == selectedDeviceUID }?.canPlay ?? false
+    }
+
+    /// Input channels the selected device offers.
+    var inputChannels: UInt32 {
+        devices.first { $0.uid == selectedDeviceUID }?.inputChannels ?? 1
+    }
+
+    /// Whether a transfer function can be started with the current selection.
+    ///
+    /// An internal reference needs an output to reference; a loopback reference
+    /// needs a second input channel to carry it.
+    var transferBlocker: String? {
+        guard mode == AnalyzerMode_Transfer else { return nil }
+        if reference == AnalyzerReference_Internal {
+            if !canPlay {
+                return """
+                    This device has no output. A transfer function against an internal reference                     has to play the stimulus itself - create an aggregate device in Audio MIDI                     Setup combining your input and output, and select it here.
+                    """
+            }
+            if signal == AnalyzerSignal_Silence {
+                return """
+                    Choose a stimulus. An internal reference is the generator's own signal, so                     there is nothing to reference while it is silent.
+                    """
+            }
+        } else if inputChannels < 2 {
+            return """
+                This device has one input channel, so there is nowhere to wire a loopback. Use                 an internal reference instead.
+                """
+        }
+        return nil
+    }
 
     /// Rate the current session runs at, for labelling.
     private var displayRate: Double {
@@ -66,12 +128,23 @@ final class AnalyzerModel: ObservableObject {
 
     func start() {
         stop()
+        if let blocker = transferBlocker {
+            errorMessage = blocker
+            isRunning = false
+            return
+        }
         do {
             let handle = try AnalyzerSessionHandle(
                 deviceUID: selectedDeviceUID,
                 fftSize: fftSize,
                 window: window,
-                averaging: averaging
+                averaging: averaging,
+                mode: mode,
+                reference: reference,
+                referenceChannel: referenceChannel,
+                signal: signal,
+                signalLevelDb: signalLevelDb,
+                signalHz: signalHz
             )
             session = handle
             deviceName = handle.deviceName
@@ -90,6 +163,28 @@ final class AnalyzerModel: ObservableObject {
         session?.stop()
         session = nil
         isRunning = false
+        transfer = nil
+    }
+
+    /// Measure the reference-to-measurement delay and remove it.
+    func findDelay() {
+        session?.estimateDelay()
+    }
+
+    /// A stimulus turning on or off changes whether an output stream exists,
+    /// which is a device operation; anything else is a live change the audio
+    /// thread picks up on its next callback.
+    private func signalChanged(wasSilent: Bool) {
+        let nowSilent = signal == AnalyzerSignal_Silence
+        if wasSilent != nowSilent {
+            restartIfRunning()
+        } else {
+            pushSignal()
+        }
+    }
+
+    private func pushSignal() {
+        session?.setSignal(signal, levelDb: signalLevelDb, hz: signalHz)
     }
 
     /// Ask for a location and write the current spectrum there.
@@ -172,7 +267,6 @@ struct SpectrumView: NSViewRepresentable {
 
         func attach(to view: MTKView) {
             guard let renderer else { return }
-            renderer.levelRange = (model.minDb, model.maxDb)
 
             renderer.onResize = { [weak self] size in
                 guard let self else { return }
@@ -188,51 +282,95 @@ struct SpectrumView: NSViewRepresentable {
                 }
             }
 
-            renderer.traceProvider = { [weak self] columns in
-                guard let self else { return [][...] }
-                return MainActor.assumeIsolated {
-                    guard let session = self.model.session else { return [][...] }
-                    if columns != self.lastColumns {
-                        self.lastColumns = columns
-                        session.setPlot(
-                            width: Float(columns),
-                            height: 1,
-                            minHz: self.model.minHz,
-                            maxHz: self.model.maxHz,
-                            minDb: self.model.minDb,
-                            maxDb: self.model.maxDb
-                        )
-                    }
-                    let trace = session.copyTrace(columns: columns)
-                    if let info = session.frameInfo {
-                        self.model.overruns = info.overruns
-                        self.model.framesAveraged = info.framesAveraged
-                        self.model.averageFrames = info.averageFrames
-                    }
-                    // Distortion is a per-frame read but is only worth
-                    // recomputing at a rate a human can follow, not at 120 Hz.
-                    self.distortionCountdown -= 1
-                    if self.distortionCountdown <= 0 {
-                        self.distortionCountdown = 30
-                        self.model.distortion = session.distortion()
-                    }
-                    return trace
-                }
-            }
-
-            renderer.averageProvider = { [weak self] columns in
-                guard let self else { return [][...] }
-                return MainActor.assumeIsolated {
-                    guard self.model.showAverage, let session = self.model.session else {
+            // Back to front. The long-term average sits under the live trace,
+            // and coherence sits under everything because it is context for the
+            // curve above it rather than the thing being read.
+            renderer.layers = [
+                layer(colour: SIMD4(0.55, 0.55, 0.62, 0.55), range: (0, 1)) { session, columns in
+                    guard self.model.mode == AnalyzerMode_Transfer, self.model.showCoherence else {
                         return [][...]
                     }
+                    return session.copyTransfer(AnalyzerCurve_Coherence, columns: columns)
+                },
+                layer(colour: SIMD4(0.55, 0.45, 0.95, 0.8), range: (-180, 180)) { session, columns in
+                    guard self.model.mode == AnalyzerMode_Transfer, self.model.showPhase else {
+                        return [][...]
+                    }
+                    return session.copyTransfer(AnalyzerCurve_Phase, columns: columns)
+                },
+                layer(colour: SIMD4(1.0, 0.65, 0.25, 0.9), range: levelRange) { session, columns in
+                    guard self.model.showAverage else { return [][...] }
                     return session.copyAverage(columns: columns)
-                }
-            }
+                },
+                // The main curve, and the one that carries the per-frame
+                // bookkeeping: it is drawn every frame and the others are not.
+                layer(colour: SIMD4(0.35, 0.85, 0.45, 1.0), range: levelRange) { session, columns in
+                    self.refreshReadouts(session)
+                    return self.model.mode == AnalyzerMode_Transfer
+                        ? session.copyTransfer(AnalyzerCurve_Magnitude, columns: columns)
+                        : session.copyTrace(columns: columns)
+                },
+            ]
 
             renderer.gridProvider = { [weak self] in
                 guard let self else { return [] }
                 return MainActor.assumeIsolated { self.gridLines() }
+            }
+        }
+
+        /// The magnitude axis, which both spectrum and transfer function use.
+        private var levelRange: (min: Float, max: Float) { (model.minDb, model.maxDb) }
+
+        /// Build a layer that only runs while a session exists, and that
+        /// re-declares the plot geometry the first time the width changes.
+        private func layer(
+            colour: SIMD4<Float>,
+            range: (min: Float, max: Float),
+            body: @escaping (AnalyzerSessionHandle, Int) -> ArraySlice<Float>
+        ) -> SpectrumRenderer.Layer {
+            SpectrumRenderer.Layer(
+                provider: { [weak self] columns in
+                    guard let self else { return [][...] }
+                    return MainActor.assumeIsolated {
+                        guard let session = self.model.session else { return [][...] }
+                        self.syncGeometry(session, columns: columns)
+                        return body(session, columns)
+                    }
+                },
+                range: range,
+                colour: colour
+            )
+        }
+
+        /// One column count for every layer in a frame, so the curves overlay
+        /// exactly instead of being a pixel apart from each other.
+        private func syncGeometry(_ session: AnalyzerSessionHandle, columns: Int) {
+            guard columns != lastColumns else { return }
+            lastColumns = columns
+            session.setPlot(
+                width: Float(columns),
+                height: 1,
+                minHz: model.minHz,
+                maxHz: model.maxHz,
+                minDb: model.minDb,
+                maxDb: model.maxDb
+            )
+        }
+
+        private func refreshReadouts(_ session: AnalyzerSessionHandle) {
+            if let info = session.frameInfo {
+                model.overruns = info.overruns
+                model.framesAveraged = info.framesAveraged
+                model.averageFrames = info.averageFrames
+            }
+            model.transfer = model.mode == AnalyzerMode_Transfer ? session.transferInfo : nil
+
+            // Distortion is a per-frame read but is only worth recomputing at a
+            // rate a human can follow, not at 120 Hz.
+            distortionCountdown -= 1
+            if distortionCountdown <= 0 {
+                distortionCountdown = 30
+                model.distortion = session.distortion()
             }
         }
 
@@ -265,6 +403,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
+            transferBar
             plot
             Divider()
             statusBar
@@ -275,6 +414,97 @@ struct ContentView: View {
             model.start()
         }
         .onDisappear { model.stop() }
+    }
+
+    /// The second row, shown only in transfer mode.
+    ///
+    /// Kept out of the main toolbar rather than disabled in place: five extra
+    /// controls greyed out is worse than five controls that are not there.
+    @ViewBuilder
+    private var transferBar: some View {
+        if model.mode == AnalyzerMode_Transfer {
+            HStack(spacing: 12) {
+                Picker("Reference", selection: $model.reference) {
+                    Text("Internal").tag(AnalyzerReference_Internal)
+                    Text("Loopback").tag(AnalyzerReference_Input)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
+
+                if model.reference == AnalyzerReference_Input {
+                    Picker("Channel", selection: $model.referenceChannel) {
+                        ForEach(0..<Int(model.inputChannels), id: \.self) { channel in
+                            Text("\(channel + 1)").tag(UInt32(channel))
+                        }
+                    }
+                    .frame(width: 120)
+                }
+
+                Button("Find delay") { model.findDelay() }
+                    .disabled(!model.isRunning)
+                    .help("""
+                        Cross-correlate the two channels and remove the propagation delay.                         Without this the phase curve winds through hundreds of turns and                         coherence collapses well before 1 kHz.
+                        """)
+
+                if let transfer = model.transfer {
+                    Text(transfer.delaySummary)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(transfer.estimating ? .orange : .secondary)
+                        .frame(width: 140, alignment: .leading)
+                }
+
+                Divider().frame(height: 16)
+
+                Toggle("Phase", isOn: $model.showPhase).toggleStyle(.checkbox)
+                Toggle("Coherence", isOn: $model.showCoherence).toggleStyle(.checkbox)
+
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary.opacity(0.3))
+            Divider()
+        }
+    }
+
+    /// Generator controls, shown whenever the device can play.
+    @ViewBuilder
+    private var generator: some View {
+        Picker("Signal", selection: $model.signal) {
+            Text("Off").tag(AnalyzerSignal_Silence)
+            Text("Pink").tag(AnalyzerSignal_PinkNoise)
+            Text("White").tag(AnalyzerSignal_WhiteNoise)
+            Text("Sine").tag(AnalyzerSignal_Sine)
+        }
+        .frame(width: 150)
+        .disabled(!model.canPlay)
+        .help(model.canPlay
+              ? "Stimulus played out of the selected device."
+              : """
+                This device has no output. Create an aggregate device in Audio MIDI Setup to                 play and capture together.
+                """)
+
+        if model.signal != AnalyzerSignal_Silence {
+            // Labelled in dBFS and capped below full scale. A generator that
+            // defaults to loud is a generator that damages something.
+            Slider(value: $model.signalLevelDb, in: -60...0) {
+                Text("Level")
+            }
+            .frame(width: 110)
+            Text(String(format: "%.0f dB", model.signalLevelDb))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, alignment: .trailing)
+        }
+
+        if model.signal == AnalyzerSignal_Sine {
+            Slider(value: $model.signalHz, in: 20...20_000) { Text("Frequency") }
+                .frame(width: 110)
+            Text(formatFrequency(model.signalHz))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, alignment: .trailing)
+        }
     }
 
     private var toolbar: some View {
@@ -315,6 +545,15 @@ struct ContentView: View {
                 Text("Peak hold").tag(AnalyzerAveraging_PeakHold)
             }
             .frame(width: 160)
+
+            Picker("Mode", selection: $model.mode) {
+                Text("RTA").tag(AnalyzerMode_Spectrum)
+                Text("Transfer").tag(AnalyzerMode_Transfer)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+
+            generator
 
             Spacer()
 
@@ -386,6 +625,16 @@ struct ContentView: View {
                 Label("\(model.overruns) dropped", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             }
+            if let transfer = model.transfer {
+                // The count matters: coherence is identically one for a single
+                // frame, so an unsettled curve looks perfect and is not.
+                Text("tf \(transfer.frames)")
+                    .foregroundStyle(transfer.isSettled ? Color.secondary : Color.orange)
+                if !transfer.isSettled {
+                    Text("settling")
+                        .foregroundStyle(.orange)
+                }
+            }
             if let distortion = model.distortion {
                 // Only shown when a tone is actually present; otherwise the
                 // figure would be the distortion of room noise.
@@ -399,7 +648,11 @@ struct ContentView: View {
                     )
             }
             Spacer()
-            Text("0 dBFS = full scale sine")
+            if model.mode == AnalyzerMode_Transfer {
+                Text("magnitude dB · phase ±180° · coherence 0-1")
+            } else {
+                Text("0 dBFS = full scale sine")
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.secondary)

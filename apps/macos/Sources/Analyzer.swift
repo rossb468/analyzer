@@ -14,10 +14,18 @@ struct AudioDevice: Identifiable, Hashable {
     let uid: String
     let name: String
     let inputChannels: UInt32
+    let outputChannels: UInt32
     let sampleRate: Double
     let isDefaultInput: Bool
 
     var id: String { uid }
+
+    /// Whether this device can play a stimulus as well as capture.
+    ///
+    /// CoreAudio drives one device from one IOProc, so a transfer function
+    /// against an internal reference needs both directions on the same device.
+    /// A separate speaker and microphone means an aggregate device.
+    var canPlay: Bool { outputChannels > 0 }
 }
 
 /// Metadata about the most recent analysis frame.
@@ -47,6 +55,26 @@ struct DistortionReading {
             ? " (to H\(harmonics.count + 1))"
             : ""
         return String(format: "THD %.3f%%%@ @ %@", thdPercent, orders, formatFrequency(fundamentalHz))
+    }
+}
+
+/// State of a running transfer function.
+struct TransferInfo {
+    /// Frames folded into the estimate. Zero means none is running.
+    let frames: UInt32
+    let delayFrames: UInt32
+    let delayMs: Float
+    let delayMetres: Float
+    /// A delay estimate has been asked for and has not settled.
+    let estimating: Bool
+
+    /// Coherence is identically one for a single frame, so a curve built from
+    /// a handful of them says nothing yet.
+    var isSettled: Bool { frames >= 8 }
+
+    var delaySummary: String {
+        if estimating { return "finding delay…" }
+        return String(format: "%.2f ms · %.2f m", delayMs, delayMetres)
     }
 }
 
@@ -87,6 +115,7 @@ func availableInputDevices() -> [AudioDevice] {
                 uid: String(cString: uid),
                 name: String(cString: name),
                 inputChannels: raw.input_channels,
+                outputChannels: raw.output_channels,
                 sampleRate: raw.sample_rate,
                 isDefaultInput: raw.is_default_input
             )
@@ -109,11 +138,28 @@ final class AnalyzerSessionHandle {
     /// Start capturing.
     ///
     /// - Parameter deviceUID: `nil` selects the system default input.
-    init(deviceUID: String?, fftSize: UInt32, window: AnalyzerWindow, averaging: AnalyzerAveraging) throws {
+    init(
+        deviceUID: String?,
+        fftSize: UInt32,
+        window: AnalyzerWindow,
+        averaging: AnalyzerAveraging,
+        mode: AnalyzerMode = AnalyzerMode_Spectrum,
+        reference: AnalyzerReference = AnalyzerReference_Internal,
+        referenceChannel: UInt32 = 1,
+        signal: AnalyzerSignal = AnalyzerSignal_Silence,
+        signalLevelDb: Float = -20,
+        signalHz: Float = 1000
+    ) throws {
         var config = analyzer_session_config_default()
         config.fft_size = fftSize
         config.window = window
         config.averaging = averaging
+        config.mode = mode
+        config.reference = reference
+        config.reference_channel = referenceChannel
+        config.signal = signal
+        config.signal_level_db = signalLevelDb
+        config.signal_hz = signalHz
 
         var status = AnalyzerStatus()
         let started: OpaquePointer?
@@ -198,6 +244,74 @@ final class AnalyzerSessionHandle {
             return Int(analyzer_session_copy_average(handle, base, UInt(columns)))
         }
         return averageStorage[0..<written]
+    }
+
+    /// Scratch for the transfer curves, one buffer each so a renderer can hold
+    /// all three at once without one overwriting another mid-frame.
+    private var transferStorage: [AnalyzerCurve.RawValue: [Float]] = [:]
+
+    /// Copy one transfer function curve, one value per pixel column.
+    ///
+    /// Returns an empty slice in spectrum mode, so a caller can ask
+    /// unconditionally and simply draw nothing.
+    func copyTransfer(_ curve: AnalyzerCurve, columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        var storage = transferStorage[curve.rawValue] ?? []
+        if storage.count < columns {
+            storage = [Float](repeating: 0, count: columns)
+        }
+        let written = storage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_transfer(handle, curve, base, UInt(columns)))
+        }
+        transferStorage[curve.rawValue] = storage
+        return storage[0..<written]
+    }
+
+    var transferInfo: TransferInfo? {
+        guard let handle else { return nil }
+        var raw = AnalyzerTransferInfo()
+        guard analyzer_session_transfer_info(handle, &raw) else { return nil }
+        return TransferInfo(
+            frames: raw.frames,
+            delayFrames: raw.delay_frames,
+            delayMs: raw.delay_ms,
+            delayMetres: raw.delay_metres,
+            estimating: raw.estimating
+        )
+    }
+
+    /// Ask the core to measure the reference-to-measurement delay and remove it.
+    func estimateDelay() {
+        guard let handle else { return }
+        _ = analyzer_session_estimate_delay(handle)
+    }
+
+    /// Set the reference delay by hand.
+    func setDelay(frames: UInt32) {
+        guard let handle else { return }
+        _ = analyzer_session_set_delay(handle, frames)
+    }
+
+    /// Change the stimulus without restarting.
+    ///
+    /// Only has an effect if the session was started with an output open; a
+    /// session started silent has no output stream to write into.
+    func setSignal(_ signal: AnalyzerSignal, levelDb: Float, hz: Float) {
+        guard let handle else { return }
+        _ = analyzer_session_set_signal(handle, signal, levelDb, hz)
+    }
+
+    /// Map a phase in degrees to a pixel row.
+    func y(forPhase degrees: Float) -> Float {
+        guard let handle else { return .nan }
+        return analyzer_phase_to_y(handle, degrees)
+    }
+
+    /// Map a coherence value to a pixel row.
+    func y(forCoherence value: Float) -> Float {
+        guard let handle else { return .nan }
+        return analyzer_coherence_to_y(handle, value)
     }
 
     /// Restart the long-term average without disturbing the live trace.

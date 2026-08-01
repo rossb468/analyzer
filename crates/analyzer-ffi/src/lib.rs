@@ -1812,6 +1812,29 @@ mod tests {
             assert!(!analyzer_device_list_get(ptr::null(), 0, ptr::null_mut()));
 
             analyzer_session_stop(ptr::null_mut());
+            assert_eq!(
+                analyzer_session_copy_transfer(
+                    ptr::null_mut(),
+                    AnalyzerCurve::Magnitude,
+                    ptr::null_mut(),
+                    0
+                ),
+                0
+            );
+            assert!(!analyzer_session_transfer_info(
+                ptr::null_mut(),
+                ptr::null_mut()
+            ));
+            assert!(!analyzer_session_estimate_delay(ptr::null_mut()));
+            assert!(!analyzer_session_set_delay(ptr::null_mut(), 0));
+            assert!(!analyzer_session_set_signal(
+                ptr::null_mut(),
+                AnalyzerSignal::PinkNoise,
+                -20.0,
+                1000.0
+            ));
+            assert!(analyzer_phase_to_y(ptr::null(), 0.0).is_nan());
+            assert!(analyzer_coherence_to_y(ptr::null(), 0.0).is_nan());
             assert!(!analyzer_session_has_new_frame(ptr::null()));
             assert_eq!(
                 analyzer_session_copy_trace(ptr::null_mut(), ptr::null_mut(), 0),
@@ -1916,6 +1939,53 @@ mod tests {
         assert!(config.device_uid.is_null(), "null means default device");
         assert_eq!(config.fft_size, 4096);
         assert!(config.fft_size.is_multiple_of(2));
+        assert_eq!(config.mode, AnalyzerMode::Spectrum, "a UI opens on the RTA");
+        assert_eq!(
+            config.signal,
+            AnalyzerSignal::Silence,
+            "nothing plays until asked"
+        );
+        assert!(
+            config.signal_level_db <= -12.0,
+            "the default stimulus level must be quiet enough not to damage anything"
+        );
+    }
+
+    /// A level above full scale cannot be produced and would only clip.
+    #[test]
+    fn the_stimulus_level_is_capped_at_full_scale() {
+        let state = SignalState::new(AnalyzerSignal::Sine, 40.0, 1000.0);
+        match state.signal() {
+            Signal::Sine { amplitude, .. } => assert!(
+                (amplitude - 1.0).abs() < 1e-6,
+                "expected clamping to unity, got {amplitude}"
+            ),
+            other => panic!("wrong signal: {other:?}"),
+        }
+    }
+
+    /// Decibels must reach the generator as a linear amplitude.
+    #[test]
+    fn the_stimulus_level_converts_from_decibels() {
+        let state = SignalState::new(AnalyzerSignal::PinkNoise, -20.0, 0.0);
+        match state.signal() {
+            Signal::PinkNoise { amplitude } => assert!(
+                (amplitude - 0.1).abs() < 1e-6,
+                "-20 dB is 0.1, got {amplitude}"
+            ),
+            other => panic!("wrong signal: {other:?}"),
+        }
+    }
+
+    /// Every change must be visible to the audio thread, which only reloads
+    /// when the counter moves.
+    #[test]
+    fn changing_the_stimulus_bumps_the_generation() {
+        let state = SignalState::new(AnalyzerSignal::Silence, -20.0, 1000.0);
+        let before = state.generation.load(Ordering::Acquire);
+        state.set(AnalyzerSignal::Sine, -6.0, 440.0);
+        assert!(state.generation.load(Ordering::Acquire) > before);
+        assert!(matches!(state.signal(), Signal::Sine { hz, .. } if (hz - 440.0).abs() < 1e-6));
     }
 
     #[test]

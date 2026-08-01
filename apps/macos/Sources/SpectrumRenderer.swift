@@ -4,11 +4,11 @@ import simd
 
 /// Metal renderer for the live spectrum.
 ///
-/// The CPU does almost nothing per frame. It copies a trace of one level per
-/// pixel column into a shared buffer and issues two draws; the vertex shader
-/// derives x from the vertex id and y from the level, so no vertex geometry is
+/// The CPU does almost nothing per frame. It copies one value per pixel column
+/// into a shared buffer and issues one draw per curve; the vertex shader
+/// derives x from the vertex id and y from the value, so no vertex geometry is
 /// ever built on the CPU. That is the whole reason the core hands over reduced
-/// levels rather than points.
+/// values rather than points.
 ///
 /// Text is not drawn here. Axis labels are native SwiftUI overlaid on top, which
 /// is both sharper and far less code than a Metal glyph atlas.
@@ -23,20 +23,21 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
 
     struct Uniforms {
         float  count;      // trace points
-        float  minDb;
-        float  maxDb;
+        float  minValue;   // bottom of the axis this curve maps through
+        float  maxValue;
         float  pad;
         float4 colour;
     };
 
-    // One vertex per pixel column. x comes from the vertex id, y from the level,
-    // so the CPU uploads levels and nothing else.
+    // One vertex per pixel column. x comes from the vertex id, y from the
+    // value, so the CPU uploads values and nothing else. The range is per draw,
+    // which is what lets decibels, degrees and coherence share one pipeline.
     vertex float4 trace_vertex(uint vid [[vertex_id]],
-                               const device float *levels [[buffer(0)]],
+                               const device float *values [[buffer(0)]],
                                constant Uniforms &u [[buffer(1)]]) {
         float x = (u.count > 1.0) ? (float(vid) / (u.count - 1.0)) : 0.0;
-        float db = levels[vid];
-        float t = saturate((db - u.minDb) / max(u.maxDb - u.minDb, 1e-6));
+        float span = max(u.maxValue - u.minValue, 1e-6);
+        float t = saturate((values[vid] - u.minValue) / span);
         return float4(x * 2.0 - 1.0, t * 2.0 - 1.0, 0.0, 1.0);
     }
 
@@ -57,10 +58,22 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
 
     private struct Uniforms {
         var count: Float = 0
-        var minDb: Float = -120
-        var maxDb: Float = 0
+        var minValue: Float = -120
+        var maxValue: Float = 0
         var pad: Float = 0
         var colour: SIMD4<Float> = .init(0.35, 0.85, 0.45, 1)
+    }
+
+    /// One curve to draw.
+    ///
+    /// The shader maps a value through `range` onto the vertical axis, so a
+    /// layer is not restricted to decibels: phase spans -180..180 and coherence
+    /// spans 0..1 through exactly the same pipeline. Layers are drawn in list
+    /// order, so whatever the user is watching move belongs last.
+    struct Layer {
+        var provider: (Int) -> ArraySlice<Float>
+        var range: (min: Float, max: Float)
+        var colour: SIMD4<Float>
     }
 
     private let device: MTLDevice
@@ -69,20 +82,16 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
     private let gridPipeline: MTLRenderPipelineState
 
     /// Shared-storage buffers, written by the CPU and read by the GPU without a
-    /// blit. Grown only when the drawable does.
-    private var traceBuffer: MTLBuffer?
-    private var averageBuffer: MTLBuffer?
+    /// blit. One per layer, grown only when the drawable does. Never shared
+    /// between layers: the GPU reads them after the draw is encoded, so one
+    /// buffer refilled mid-frame would tear.
+    private var layerBuffers: [MTLBuffer?] = []
     private var gridBuffer: MTLBuffer?
     private var gridVertexCount = 0
 
-    private var uniforms = Uniforms()
-
-    /// Set by the view before each draw.
-    var traceProvider: ((Int) -> ArraySlice<Float>)?
-    /// Long-term average, drawn under the live trace. Nil hides it.
-    var averageProvider: ((Int) -> ArraySlice<Float>)?
+    /// Curves to draw, back to front. Set by the view.
+    var layers: [Layer] = []
     var gridProvider: (() -> [SIMD2<Float>])?
-    var levelRange: (min: Float, max: Float) = (-120, 0)
     var onResize: ((CGSize) -> Void)?
 
     init?(view: MTKView) {
@@ -141,34 +150,28 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         }
 
-        // The average is drawn first so the live trace sits on top of it - the
-        // live one is what the user is watching move.
-        if let levels = averageProvider?(columns), !levels.isEmpty {
-            upload(Array(levels), into: &averageBuffer)
-            var average = uniforms
-            average.count = Float(levels.count)
-            average.minDb = levelRange.min
-            average.maxDb = levelRange.max
-            average.colour = SIMD4<Float>(1.0, 0.65, 0.25, 0.9)
-
-            encoder.setRenderPipelineState(tracePipeline)
-            encoder.setVertexBuffer(averageBuffer, offset: 0, index: 0)
-            encoder.setVertexBytes(&average, length: MemoryLayout<Uniforms>.stride, index: 1)
-            encoder.setFragmentBytes(&average, length: MemoryLayout<Uniforms>.stride, index: 1)
-            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: levels.count)
+        if layerBuffers.count < layers.count {
+            layerBuffers.append(
+                contentsOf: [MTLBuffer?](repeating: nil, count: layers.count - layerBuffers.count)
+            )
         }
 
-        if let levels = traceProvider?(columns), !levels.isEmpty {
-            upload(Array(levels), into: &traceBuffer)
-            uniforms.count = Float(levels.count)
-            uniforms.minDb = levelRange.min
-            uniforms.maxDb = levelRange.max
+        encoder.setRenderPipelineState(tracePipeline)
+        for (index, layer) in layers.enumerated() {
+            let values = layer.provider(columns)
+            guard !values.isEmpty else { continue }
 
-            encoder.setRenderPipelineState(tracePipeline)
-            encoder.setVertexBuffer(traceBuffer, offset: 0, index: 0)
+            upload(Array(values), into: &layerBuffers[index])
+            var uniforms = Uniforms()
+            uniforms.count = Float(values.count)
+            uniforms.minValue = layer.range.min
+            uniforms.maxValue = layer.range.max
+            uniforms.colour = layer.colour
+
+            encoder.setVertexBuffer(layerBuffers[index], offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: levels.count)
+            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: values.count)
         }
 
         encoder.endEncoding()
