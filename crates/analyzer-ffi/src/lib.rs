@@ -28,14 +28,20 @@
 use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
-use analyzer_dsp::{Averaging, DistortionConfig, Overlap, SpectrumConfig, WindowKind};
-use analyzer_engine::{Engine, EngineConfig, rt_section};
+use analyzer_dsp::{
+    Averaging, DistortionConfig, Generator, Overlap, Signal, SpectrumConfig, WindowKind,
+};
+use analyzer_engine::{AnalysisMode, Engine, EngineConfig, rt_section};
 use analyzer_model::{Measurement, MeasurementData, MeasurementId, References};
-use analyzer_plot::{FrequencyAxis, LevelAxis, Reduction, Trace, reduce};
+use analyzer_plot::{
+    FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
+};
 
 /// Longest message [`AnalyzerStatus`] can carry, including the terminator.
 pub const ANALYZER_MESSAGE_LEN: usize = 256;
@@ -342,6 +348,21 @@ pub struct AnalyzerSessionConfig {
     pub overlap: AnalyzerOverlap,
     /// Averaging mode.
     pub averaging: AnalyzerAveraging,
+    /// What to compute.
+    pub mode: AnalyzerMode,
+    /// Where the transfer function reference comes from.
+    pub reference: AnalyzerReference,
+    /// Reference input channel, used when `reference` is
+    /// [`AnalyzerReference::Input`].
+    pub reference_channel: u32,
+    /// Stimulus to play. [`AnalyzerSignal::Silence`] opens no output at all.
+    pub signal: AnalyzerSignal,
+    /// Stimulus level in dBFS, as a peak amplitude. Clamped to at most 0.
+    pub signal_level_db: f32,
+    /// Sine frequency, used when `signal` is [`AnalyzerSignal::Sine`].
+    pub signal_hz: f32,
+    /// Bit per device output channel; bit 0 is channel 0.
+    pub output_mask: u32,
 }
 
 impl Default for AnalyzerSessionConfig {
@@ -354,8 +375,108 @@ impl Default for AnalyzerSessionConfig {
             window: AnalyzerWindow::Hann,
             overlap: AnalyzerOverlap::ThreeQuarters,
             averaging: AnalyzerAveraging::Fast,
+            mode: AnalyzerMode::Spectrum,
+            reference: AnalyzerReference::Internal,
+            reference_channel: 1,
+            signal: AnalyzerSignal::Silence,
+            // Quiet enough not to startle anyone, loud enough to measure. A
+            // default that plays at full scale into unknown speakers is a
+            // default that damages something.
+            signal_level_db: -20.0,
+            signal_hz: 1000.0,
+            output_mask: 0b11,
         }
     }
+}
+
+/// Generator settings shared with the audio callback.
+///
+/// Atomics rather than a lock: the callback reads these on the real-time
+/// thread, where blocking on a UI thread's mutex is the classic way to produce
+/// a dropout. `generation` is bumped last, so seeing a new value guarantees the
+/// fields behind it are already written.
+#[derive(Debug, Default)]
+struct SignalState {
+    generation: AtomicU32,
+    kind: AtomicU32,
+    amplitude_bits: AtomicU32,
+    hz_bits: AtomicU32,
+}
+
+impl SignalState {
+    fn new(signal: AnalyzerSignal, level_db: f32, hz: f32) -> Self {
+        let state = Self::default();
+        state.set(signal, level_db, hz);
+        state
+    }
+
+    fn set(&self, signal: AnalyzerSignal, level_db: f32, hz: f32) {
+        // A level above 0 dBFS cannot be produced and would only clip, so the
+        // ceiling is enforced here rather than trusted to the caller.
+        let amplitude = 10.0_f32.powf(level_db.min(0.0) / 20.0);
+        self.kind.store(signal as u32, Ordering::Relaxed);
+        self.amplitude_bits
+            .store(amplitude.to_bits(), Ordering::Relaxed);
+        self.hz_bits.store(hz.max(0.0).to_bits(), Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn signal(&self) -> Signal {
+        let amplitude = f32::from_bits(self.amplitude_bits.load(Ordering::Relaxed));
+        let hz = f32::from_bits(self.hz_bits.load(Ordering::Relaxed));
+        match self.kind.load(Ordering::Relaxed) {
+            1 => Signal::Sine { hz, amplitude },
+            2 => Signal::WhiteNoise { amplitude },
+            3 => Signal::PinkNoise { amplitude },
+            _ => Signal::Silence,
+        }
+    }
+}
+
+/// What the session computes.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerMode {
+    /// Single-channel spectrum.
+    #[default]
+    Spectrum = 0,
+    /// Two-channel transfer function, alongside the spectrum.
+    Transfer = 1,
+}
+
+/// Where the transfer function's reference comes from.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerReference {
+    /// The generator's own samples, captured alongside the input.
+    ///
+    /// Needs no loopback cable and works with a one-channel microphone, which
+    /// is what makes a transfer function possible on a bare laptop. The cost is
+    /// that it measures the acoustic path plus the converter round trip rather
+    /// than the acoustic path alone, so the delay finder has to remove a delay
+    /// it cannot know in advance.
+    #[default]
+    Internal = 0,
+    /// A second input channel, fed from a physical loopback.
+    ///
+    /// More accurate: the converter's own latency and response appear in both
+    /// channels and divide out.
+    Input = 1,
+}
+
+/// Stimulus the generator produces.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerSignal {
+    /// Generator off.
+    #[default]
+    Silence = 0,
+    /// Steady sine, for distortion and calibration.
+    Sine = 1,
+    /// Equal energy per hertz.
+    WhiteNoise = 2,
+    /// Equal energy per octave. The usual transfer function stimulus.
+    PinkNoise = 3,
 }
 
 /// A configuration filled with the defaults a UI should start from.
@@ -468,6 +589,13 @@ pub struct AnalyzerSession {
     columns: usize,
     trace: Trace,
     average_trace: Trace,
+    transfer_trace: Trace,
+    /// Axis for phase in degrees, spanning the same pixels as the level axis.
+    /// Held here so Swift never converts degrees to pixels itself.
+    phase: LevelAxis,
+    /// Axis for coherence, 0..1, over the same pixels again.
+    coherence: LevelAxis,
+    signal: Arc<SignalState>,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -482,6 +610,17 @@ impl std::fmt::Debug for AnalyzerSession {
             .finish_non_exhaustive()
     }
 }
+
+/// Longest callback this session will process in one pass.
+///
+/// Buffers are sized for this once, at start. A device that hands over more
+/// than this has the excess dropped, which costs a visible overrun; growing a
+/// buffer on the audio thread would instead cost an audible one.
+const MAX_CALLBACK_FRAMES: usize = 16_384;
+
+/// Fixed so a run is reproducible. Noise that differs between runs makes two
+/// measurements of the same room impossible to compare.
+const GENERATOR_SEED: u64 = 0x5EED_5EED_5EED_5EED;
 
 /// Start capturing and analysing. Returns null on failure, with `status`
 /// describing why.
@@ -567,8 +706,66 @@ fn start_session(
         ));
     }
 
-    let channels = device.input_channels as usize;
+    let inputs = device.input_channels as usize;
     let rate = device.default_sample_rate;
+
+    let playing = config.signal != AnalyzerSignal::Silence;
+    let output_channels: Vec<u32> = if playing {
+        (0..device.output_channels)
+            .filter(|c| config.output_mask & (1 << c) != 0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if playing && output_channels.is_empty() {
+        return Err(format!(
+            "a stimulus was requested but no output channel was selected; {} has {} output(s)",
+            device.name, device.output_channels
+        ));
+    }
+
+    // The internal reference is captured as one extra channel appended to the
+    // device's own, so the stimulus travels through the same ring, in the same
+    // block, as the audio it will be compared against. Nothing downstream can
+    // then slide the two apart.
+    let internal_reference =
+        config.mode == AnalyzerMode::Transfer && config.reference == AnalyzerReference::Internal;
+    let channels = inputs + usize::from(internal_reference);
+
+    let mode = match config.mode {
+        AnalyzerMode::Spectrum => AnalysisMode::Spectrum,
+        AnalyzerMode::Transfer => {
+            let reference_channel = if internal_reference {
+                inputs
+            } else {
+                config.reference_channel as usize
+            };
+            if reference_channel >= channels {
+                return Err(format!(
+                    "reference channel {reference_channel} requested but {} has {inputs}",
+                    device.name
+                ));
+            }
+            if reference_channel == config.channel as usize {
+                return Err(
+                    "the reference and measurement channels must differ; the same channel \
+                     against itself measures a wire, not a loudspeaker"
+                        .into(),
+                );
+            }
+            if internal_reference && !playing {
+                return Err(
+                    "an internal reference needs a stimulus to reference; choose a signal \
+                     or wire a loopback into a second input"
+                        .into(),
+                );
+            }
+            AnalysisMode::Transfer {
+                reference_channel,
+                measurement_channel: config.channel as usize,
+            }
+        }
+    };
     let hop = Overlap::from(config.overlap).hop(config.fft_size as usize);
     let frames_per_second = rate as f32 / hop as f32;
 
@@ -592,24 +789,99 @@ fn start_session(
         // The long-term trace always averages everything since its last reset.
         // Anything shorter would just be a second live trace.
         average: Averaging::Infinite,
+        mode,
         ring_capacity_frames: 16_384,
     });
 
     let stream_config = StreamConfig {
         input: Some(DeviceId::new(device.id.as_str())),
-        output: None,
+        output: playing.then(|| DeviceId::new(device.id.as_str())),
         sample_rate: rate,
         buffer_frames: config.buffer_frames,
-        input_channels: (0..channels as u32).collect(),
-        output_channels: Vec::new(),
+        input_channels: (0..inputs as u32).collect(),
+        output_channels,
     };
+
+    let signal = Arc::new(SignalState::new(
+        config.signal,
+        config.signal_level_db,
+        config.signal_hz,
+    ));
+
+    let mut generator = Generator::new(rate as f32, signal.signal(), GENERATOR_SEED);
+    let mut stimulus = vec![0.0_f32; MAX_CALLBACK_FRAMES];
+    // Only allocated when the reference has to be spliced in; the common
+    // spectrum path writes the device's own buffer straight into the ring.
+    let mut block = vec![
+        0.0_f32;
+        if internal_reference {
+            MAX_CALLBACK_FRAMES * channels
+        } else {
+            0
+        }
+    ];
+    let callback_signal = Arc::clone(&signal);
+    let mut generation = callback_signal.generation.load(Ordering::Acquire);
 
     let mut stream = backend
         .open(
             &stream_config,
             Box::new(move |buffers: &mut AudioBuffers<'_>| {
                 rt_section(|| {
-                    sink.write_interleaved(buffers.input());
+                    // Clamped, not trusted. A device is free to hand over a
+                    // larger block than it promised, and growing a buffer on
+                    // this thread is exactly what must never happen.
+                    let frames = buffers.frames().min(MAX_CALLBACK_FRAMES);
+
+                    if callback_signal.generation.load(Ordering::Acquire) != generation {
+                        generation = callback_signal.generation.load(Ordering::Acquire);
+                        generator.set_signal(callback_signal.signal());
+                    }
+
+                    let stimulus = stimulus.get_mut(..frames).unwrap_or_default();
+                    if playing {
+                        generator.fill(stimulus);
+                    } else {
+                        stimulus.fill(0.0);
+                    }
+
+                    // Silence first so an oversized callback leaves no stale
+                    // audio in the tail rather than playing it back.
+                    buffers.silence_output();
+                    let outputs = buffers.output_channels();
+                    if outputs > 0 {
+                        for (frame, sample) in buffers
+                            .output_mut()
+                            .chunks_exact_mut(outputs)
+                            .zip(stimulus.iter())
+                        {
+                            // The same mono stimulus to every selected channel:
+                            // a transfer function measures one path, and
+                            // decorrelated noise between channels would make
+                            // the room sum unpredictably.
+                            frame.fill(*sample);
+                        }
+                    }
+
+                    if internal_reference {
+                        let input = buffers.input();
+                        let stride = buffers.input_channels().max(1);
+                        for ((out, src), sample) in block
+                            .chunks_exact_mut(channels)
+                            .zip(input.chunks_exact(stride))
+                            .zip(stimulus.iter())
+                        {
+                            for (slot, value) in out.iter_mut().zip(src.iter()) {
+                                *slot = *value;
+                            }
+                            if let Some(slot) = out.get_mut(stride) {
+                                *slot = *sample;
+                            }
+                        }
+                        sink.write_interleaved(block.get(..frames * channels).unwrap_or_default());
+                    } else {
+                        sink.write_interleaved(buffers.input());
+                    }
                 });
             }),
         )
@@ -630,6 +902,10 @@ fn start_session(
         columns: 1000,
         trace: Trace::default(),
         average_trace: Trace::default(),
+        transfer_trace: Trace::default(),
+        phase: LevelAxis::new(-180.0, 180.0, 600.0),
+        coherence: LevelAxis::new(0.0, 1.0, 600.0),
+        signal,
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -697,6 +973,11 @@ pub unsafe extern "C" fn analyzer_session_set_plot(
         let session = unsafe { &mut *session };
         session.frequency = FrequencyAxis::new(min_hz, max_hz, width_px);
         session.level = LevelAxis::new(min_db, max_db, height_px);
+        // Fixed ranges over the same pixels. Phase spans one full turn and
+        // coherence spans its whole domain, so neither ever needs rescaling and
+        // a UI cannot accidentally clip either.
+        session.phase = LevelAxis::new(-180.0, 180.0, height_px);
+        session.coherence = LevelAxis::new(0.0, 1.0, height_px);
         session.reduction = reduction.into();
         session.columns = width_px.round().max(1.0) as usize;
         true
@@ -743,11 +1024,250 @@ pub unsafe extern "C" fn analyzer_session_copy_trace(
     })
 }
 
-/// Which of the two traces a copy refers to.
+/// Which trace a copy refers to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Which {
     Live,
     Average,
+}
+
+/// Which transfer function curve a copy refers to.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalyzerCurve {
+    /// Magnitude in decibels. Maps through the ordinary level axis.
+    #[default]
+    Magnitude = 0,
+    /// Phase in degrees, wrapped to -180..180. Maps through
+    /// [`analyzer_phase_to_y`].
+    Phase = 1,
+    /// Coherence, 0..1. Maps through [`analyzer_coherence_to_y`].
+    Coherence = 2,
+}
+
+/// Copy one transfer function curve, one value per pixel column.
+///
+/// Returns zero in spectrum mode, so a UI can call this unconditionally and
+/// simply draw nothing.
+///
+/// Each curve is reduced in the domain it actually lives in. Magnitude is
+/// decibels and goes through the session's chosen reduction. Coherence takes
+/// the worst value in a column, because showing the best would hide the
+/// dropouts a user is looking for. Phase is averaged as a direction, so a
+/// column straddling the wrap reads 180 rather than 0.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or point to at least
+/// `capacity` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_transfer(
+    session: *mut AnalyzerSession,
+    curve: AnalyzerCurve,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        let columns = session.columns.min(capacity);
+
+        let spacing = {
+            let frame = session.engine.latest();
+            if frame.transfer_frames == 0 {
+                return 0;
+            }
+            session.bins.clear();
+            session.bins.extend_from_slice(match curve {
+                AnalyzerCurve::Magnitude => &frame.transfer_magnitude_db,
+                AnalyzerCurve::Phase => &frame.transfer_phase_degrees,
+                AnalyzerCurve::Coherence => &frame.transfer_coherence,
+            });
+            frame.bin_spacing_hz
+        };
+
+        match curve {
+            AnalyzerCurve::Magnitude => reduce(
+                &session.bins,
+                spacing,
+                &session.frequency,
+                columns,
+                session.reduction,
+                &mut session.transfer_trace,
+            ),
+            AnalyzerCurve::Phase => reduce_linear(
+                &session.bins,
+                spacing,
+                &session.frequency,
+                columns,
+                LinearReduction::Circular,
+                0.0,
+                &mut session.transfer_trace,
+            ),
+            AnalyzerCurve::Coherence => reduce_linear(
+                &session.bins,
+                spacing,
+                &session.frequency,
+                columns,
+                LinearReduction::Min,
+                0.0,
+                &mut session.transfer_trace,
+            ),
+        }
+
+        let written = session.transfer_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.transfer_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+/// State of the transfer function.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerTransferInfo {
+    /// Frames folded into the estimate. Zero means no transfer function is
+    /// running, or none has been produced yet.
+    ///
+    /// Coherence is identically one for a single frame, so a UI should not
+    /// present it as meaningful until this is comfortably above one.
+    pub frames: u32,
+    /// Delay currently removed from the reference, in samples.
+    pub delay_frames: u32,
+    /// The same delay in milliseconds.
+    pub delay_ms: f32,
+    /// Distance that delay corresponds to in air, in metres.
+    pub delay_metres: f32,
+    /// Whether a delay estimate has been asked for and not yet settled.
+    pub estimating: bool,
+}
+
+/// Read the transfer function's state.
+///
+/// # Safety
+///
+/// `session` must be null or live; `out` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_transfer_info(
+    session: *mut AnalyzerSession,
+    out: *mut AnalyzerTransferInfo,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let delay = session.engine.reference_delay();
+        let rate = session.engine.latest().sample_rate.max(1.0);
+        let seconds = delay as f32 / rate;
+        let info = AnalyzerTransferInfo {
+            frames: session.engine.latest().transfer_frames,
+            delay_frames: delay,
+            delay_ms: seconds * 1000.0,
+            // 343 m/s, the conventional figure at 20 C.
+            delay_metres: seconds * 343.0,
+            estimating: session.engine.delay_estimate_pending(),
+        };
+        unsafe { *out = info };
+        true
+    })
+}
+
+/// Ask the core to measure the reference-to-measurement delay and remove it.
+///
+/// Returns immediately. The estimate needs signal to work with, so it settles
+/// over the next fraction of a second and appears in
+/// [`analyzer_session_transfer_info`]; asking during silence waits rather than
+/// answering zero.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_estimate_delay(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { &*session }.engine.estimate_reference_delay();
+        true
+    })
+}
+
+/// Set the reference delay by hand, in samples.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_set_delay(
+    session: *mut AnalyzerSession,
+    frames: u32,
+) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { &*session }.engine.set_reference_delay(frames);
+        true
+    })
+}
+
+/// Change the stimulus while running.
+///
+/// Only takes effect if the session was started with a signal: opening an
+/// output stream is a device operation and cannot happen from here. A session
+/// started silent stays silent, which is why a UI offering a generator should
+/// start one even when the initial choice is silence.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_set_signal(
+    session: *mut AnalyzerSession,
+    signal: AnalyzerSignal,
+    level_db: f32,
+    hz: f32,
+) -> bool {
+    if session.is_null() || !level_db.is_finite() || !hz.is_finite() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { &*session }.signal.set(signal, level_db, hz);
+        true
+    })
+}
+
+/// Map a phase in degrees to a pixel row.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_phase_to_y(session: *const AnalyzerSession, degrees: f32) -> f32 {
+    if session.is_null() {
+        return f32::NAN;
+    }
+    guard(f32::NAN, || unsafe { &*session }.phase.db_to_y(degrees))
+}
+
+/// Map a coherence value to a pixel row.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_coherence_to_y(
+    session: *const AnalyzerSession,
+    value: f32,
+) -> f32 {
+    if session.is_null() {
+        return f32::NAN;
+    }
+    guard(f32::NAN, || unsafe { &*session }.coherence.db_to_y(value))
 }
 
 /// Copy the long-term average trace, one value per pixel column.

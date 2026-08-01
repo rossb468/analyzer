@@ -170,6 +170,9 @@ fn capture_inner(options: &LiveOptions) -> Result<SpectrumFrame, String> {
         // The CLI prints one settled figure rather than a live curve, so the
         // long-term trace is not used here; it still has to be configured.
         average: analyzer_dsp::Averaging::Infinite,
+        // The CLI's live mode is a single-channel meter; the transfer function
+        // has its own path.
+        mode: analyzer_engine::AnalysisMode::Spectrum,
         ring_capacity_frames: 16_384,
     });
 
