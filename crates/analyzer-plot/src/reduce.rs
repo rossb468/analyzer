@@ -116,6 +116,115 @@ pub fn reduce(
     }
 }
 
+/// How to combine values that are not decibels.
+///
+/// [`Reduction`] converts through the power domain, which is right for levels
+/// and nonsense for anything else. Coherence is a ratio and phase is an angle;
+/// running either through `10^(x/10)` produces a number with no meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinearReduction {
+    /// Smallest value in the column.
+    ///
+    /// The default, and the right one for coherence: showing the best value in
+    /// a pixel column would hide exactly the dropouts a user is looking for.
+    #[default]
+    Min,
+    /// Arithmetic mean.
+    Mean,
+    /// Circular mean, for angles in degrees.
+    ///
+    /// Averages unit vectors rather than numbers, so a column holding +179 deg
+    /// and -179 deg reads 180 rather than 0.
+    Circular,
+}
+
+/// Reduce non-decibel `values` onto the axis, one per pixel column.
+///
+/// Mirrors [`reduce`] exactly - same column walk, same DC skip, same sparse
+/// interpolation - and differs only in never treating a value as a level.
+/// Columns with no data read `fill` instead of negative infinity, since zero is
+/// a meaningful coherence and negative infinity is not.
+pub fn reduce_linear(
+    values: &[f32],
+    bin_spacing_hz: f32,
+    axis: &FrequencyAxis,
+    columns: usize,
+    mode: LinearReduction,
+    fill: f32,
+    out: &mut Trace,
+) {
+    out.points.clear();
+    out.points.resize(columns, fill);
+
+    if values.len() < 2 || bin_spacing_hz <= 0.0 || columns == 0 {
+        return;
+    }
+
+    let column_width = axis.width() / columns as f32;
+
+    for (index, slot) in out.points.iter_mut().enumerate() {
+        let x_left = index as f32 * column_width;
+        let x_right = x_left + column_width;
+        let hz_left = axis.x_to_freq(x_left);
+        let hz_right = axis.x_to_freq(x_right);
+
+        let first = (hz_left / bin_spacing_hz).ceil().max(1.0) as usize;
+        let last =
+            ((hz_right / bin_spacing_hz).floor() as usize).min(values.len().saturating_sub(1));
+
+        if first <= last {
+            let slice = values.get(first..=last).unwrap_or(&[]);
+            *slot = match mode {
+                LinearReduction::Min => slice.iter().copied().fold(f32::INFINITY, f32::min),
+                LinearReduction::Mean => slice.iter().sum::<f32>() / slice.len() as f32,
+                LinearReduction::Circular => circular_mean_degrees(slice),
+            };
+        } else {
+            let centre_hz = axis.x_to_freq((x_left + x_right) * 0.5);
+            *slot = match mode {
+                // Interpolating an angle linearly wraps badly, so the nearest
+                // bin is used instead. In a sparse region adjacent bins are
+                // more than a pixel apart, and the error is invisible.
+                LinearReduction::Circular => nearest(values, bin_spacing_hz, centre_hz, fill),
+                _ => interpolate_linear(values, bin_spacing_hz, centre_hz, fill),
+            };
+        }
+    }
+}
+
+/// Mean direction of angles in degrees.
+fn circular_mean_degrees(degrees: &[f32]) -> f32 {
+    let (mut x, mut y) = (0.0_f32, 0.0_f32);
+    for angle in degrees {
+        let radians = angle.to_radians();
+        x += radians.cos();
+        y += radians.sin();
+    }
+    if x == 0.0 && y == 0.0 {
+        // Perfectly opposed angles cancel and have no mean direction. Zero is
+        // as good an answer as any, and does not produce a NaN.
+        return 0.0;
+    }
+    y.atan2(x).to_degrees()
+}
+
+fn nearest(values: &[f32], bin_spacing_hz: f32, hz: f32, fill: f32) -> f32 {
+    let index = (hz / bin_spacing_hz).round().max(1.0) as usize;
+    values.get(index).copied().unwrap_or(fill)
+}
+
+fn interpolate_linear(values: &[f32], bin_spacing_hz: f32, hz: f32, fill: f32) -> f32 {
+    let exact = hz / bin_spacing_hz;
+    if exact <= 1.0 {
+        return values.get(1).copied().unwrap_or(fill);
+    }
+    let lower = exact.floor() as usize;
+    let (Some(a), Some(b)) = (values.get(lower), values.get(lower + 1)) else {
+        return values.last().copied().unwrap_or(fill);
+    };
+    a + (b - a) * (exact - lower as f32)
+}
+
 /// Mean of decibel values, averaged as power.
 fn mean_db(levels: &[f32]) -> f32 {
     if levels.is_empty() {
@@ -155,6 +264,87 @@ mod tests {
     use super::*;
 
     const SPACING: f32 = 48_000.0 / 4096.0; // 11.71875 Hz
+
+    /// Coherence must show the worst value in a column, not the best.
+    #[test]
+    fn linear_min_keeps_the_dropout() {
+        let axis = FrequencyAxis::audible(1000.0);
+        let mut values = vec![1.0_f32; 2049];
+        values[1000] = 0.2;
+        let mut trace = Trace::default();
+        // Few columns, so many bins land in each and the dropout must survive.
+        reduce_linear(
+            &values,
+            SPACING,
+            &axis,
+            64,
+            LinearReduction::Min,
+            0.0,
+            &mut trace,
+        );
+        let lowest = trace.points.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            (lowest - 0.2).abs() < 1e-6,
+            "dropout was lost, got {lowest}"
+        );
+    }
+
+    /// The wrap case that a plain arithmetic mean gets exactly backwards.
+    #[test]
+    fn circular_mean_averages_across_the_wrap() {
+        assert!((circular_mean_degrees(&[179.0, -179.0]).abs() - 180.0).abs() < 0.01);
+        assert!(circular_mean_degrees(&[10.0, -10.0]).abs() < 0.01);
+        assert!((circular_mean_degrees(&[90.0, 0.0]) - 45.0).abs() < 0.01);
+    }
+
+    /// Opposed angles have no mean direction; the answer must still be a number.
+    #[test]
+    fn circular_mean_of_opposed_angles_is_not_nan() {
+        assert!(circular_mean_degrees(&[0.0, 180.0]).is_finite());
+    }
+
+    /// An empty column reads the fill value, because zero coherence is a real
+    /// reading and negative infinity is not.
+    #[test]
+    fn linear_reduction_fills_rather_than_using_negative_infinity() {
+        let axis = FrequencyAxis::audible(1000.0);
+        let mut trace = Trace::default();
+        reduce_linear(
+            &[],
+            SPACING,
+            &axis,
+            32,
+            LinearReduction::Min,
+            0.0,
+            &mut trace,
+        );
+        assert_eq!(trace.len(), 32);
+        assert!(trace.points.iter().all(|v| *v == 0.0));
+    }
+
+    /// A constant field survives the round trip regardless of column density.
+    #[test]
+    fn a_flat_linear_field_stays_flat() {
+        let axis = FrequencyAxis::audible(1000.0);
+        let mut trace = Trace::default();
+        for columns in [37, 512, 4000] {
+            reduce_linear(
+                &vec![0.75_f32; 2049],
+                SPACING,
+                &axis,
+                columns,
+                LinearReduction::Mean,
+                0.0,
+                &mut trace,
+            );
+            for (i, value) in trace.points.iter().enumerate() {
+                assert!(
+                    (value - 0.75).abs() < 1e-4,
+                    "{columns} columns, column {i} read {value}"
+                );
+            }
+        }
+    }
 
     fn flat_bins(level: f32) -> Vec<f32> {
         vec![level; 2049]

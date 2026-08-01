@@ -20,4 +20,4 @@ pub mod axis;
 pub mod reduce;
 
 pub use axis::{FrequencyAxis, LevelAxis, Tick, format_frequency};
-pub use reduce::{Reduction, Trace, reduce};
+pub use reduce::{LinearReduction, Reduction, Trace, reduce, reduce_linear};
