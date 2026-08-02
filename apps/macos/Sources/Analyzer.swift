@@ -130,6 +130,29 @@ struct EqInfo {
     var clips: Bool { active && peakGainDb > 0.1 }
 }
 
+/// A curve captured for comparison.
+///
+/// The core stores it at analysis resolution and re-reduces it onto whatever
+/// axis is current, so this carries only what the list needs to describe it.
+struct CapturedTrace: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    var visible: Bool
+    /// Palette index chosen by the core when it was captured. The core does not
+    /// know what colour this is, only that two traces should not share one.
+    let colour: UInt32
+    let points: Int
+    let sampleRate: Float
+    let binSpacingHz: Float
+
+    var id: Int { index }
+
+    /// "16384 points · 2.93 Hz" — what the trace can actually resolve.
+    var detail: String {
+        String(format: "%d points · %.2f Hz", points, binSpacingHz)
+    }
+}
+
 /// A gridline.
 struct GridTick {
     let value: Float
@@ -526,6 +549,38 @@ final class AnalyzerSessionHandle {
             return Int(analyzer_session_copy_target(handle, base, UInt(columns)))
         }
         return targetStorage[0..<written]
+    }
+
+    /// Capture the live curve into `store`.
+    ///
+    /// The store is passed in rather than owned here because it has to outlive
+    /// the session: transform size, window and averaging all restart one, and a
+    /// "before" trace that vanished when you changed the setting you wanted to
+    /// compare would be useless.
+    @discardableResult
+    func captureTrace(into store: TraceStore, named name: String?) -> Int? {
+        guard let handle, let storeHandle = store.handle else { return nil }
+        let index: Int = {
+            guard let name, !name.isEmpty else {
+                return Int(analyzer_trace_store_capture(storeHandle, handle, nil))
+            }
+            return name.withCString {
+                Int(analyzer_trace_store_capture(storeHandle, handle, $0))
+            }
+        }()
+        return index < 0 ? nil : index
+    }
+
+    /// Copy a captured trace, reduced onto this session's current axis.
+    func copyCapturedTrace(
+        _ index: Int,
+        from store: TraceStore,
+        columns: Int
+    ) -> ArraySlice<Float> {
+        guard let handle, let storeHandle = store.handle, columns > 0 else { return [][...] }
+        return store.withScratch(index, columns: columns) { base in
+            Int(analyzer_trace_store_copy(storeHandle, UInt(index), handle, base, UInt(columns)))
+        }
     }
 
     /// Fit filters to the gap between the measurement and the target.

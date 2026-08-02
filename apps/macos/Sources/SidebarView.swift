@@ -38,6 +38,8 @@ struct SidebarView: View {
                 return nil
             }
             return Text("\(info.bandCount)")
+        case .traces:
+            return model.traces.isEmpty ? nil : Text("\(model.traces.count)")
         case .rta, .transfer:
             return nil
         }

@@ -6,28 +6,30 @@ import AnalyzerFFI
 
 /// A section of the app, as listed in the sidebar.
 ///
-/// Two kinds live in one list. `rta`, `transfer`, `measure` and `spectrogram`
-/// decide what the plot draws and so are mutually exclusive; `equaliser` and
-/// `traces` are editors whose output overlays whichever of those is active.
+/// Two kinds live in one list. The analysis sections decide what the plot draws
+/// and so are mutually exclusive; the editors produce something that overlays
+/// whichever of those is active.
 /// Selecting one of the latter therefore leaves the plot alone — the sidebar
 /// says what is being edited, not what is drawn.
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case rta
     case transfer
     case equaliser
+    case traces
 
     var id: String { rawValue }
 
     /// Sections that decide what the plot draws, listed above the editors.
     static let analysis: [AppSection] = [.rta, .transfer]
     /// Sections that edit something drawn over whatever analysis is running.
-    static let editors: [AppSection] = [.equaliser]
+    static let editors: [AppSection] = [.equaliser, .traces]
 
     var title: String {
         switch self {
         case .rta: "RTA"
         case .transfer: "Transfer"
         case .equaliser: "Equaliser"
+        case .traces: "Traces"
         }
     }
 
@@ -36,6 +38,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .rta: "waveform"
         case .transfer: "arrow.left.arrow.right"
         case .equaliser: "slider.vertical.3"
+        case .traces: "square.stack.3d.up"
         }
     }
 
@@ -47,7 +50,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .rta: AnalyzerMode_Spectrum
         case .transfer: AnalyzerMode_Transfer
-        case .equaliser: nil
+        case .equaliser, .traces: nil
         }
     }
 }
@@ -356,6 +359,70 @@ final class AnalyzerModel: ObservableObject {
     func trimEq() {
         session?.trimEq()
         refreshEq()
+    }
+
+    // -------------------------------------------------------------- traces -
+
+    /// Captured curves, mirrored from the core.
+    @Published var traces: [CapturedTrace] = []
+
+    /// The palette captured traces are drawn from.
+    ///
+    /// The core hands out an index and knows nothing about colour; this decides
+    /// what the index looks like, which is exactly the split that keeps the
+    /// Windows and Linux clients free to choose their own.
+    static let tracePalette: [SIMD4<Float>] = [
+        SIMD4(0.95, 0.45, 0.45, 0.85),
+        SIMD4(0.45, 0.85, 0.95, 0.85),
+        SIMD4(0.95, 0.75, 0.35, 0.85),
+        SIMD4(0.70, 0.55, 0.95, 0.85),
+        SIMD4(0.45, 0.95, 0.65, 0.85),
+        SIMD4(0.95, 0.55, 0.80, 0.85),
+    ]
+
+    /// Most traces drawn at once.
+    ///
+    /// The renderer's layer list is built when the view is attached, so the
+    /// slots have to exist up front. Six distinct colours is also about as many
+    /// overlaid curves as anyone can read.
+    static let maxTraces = 6
+
+    static func traceColour(_ index: UInt32) -> SIMD4<Float> {
+        tracePalette[Int(index) % tracePalette.count]
+    }
+
+    /// The captured curves themselves. Outlives every session, which is the
+    /// point: changing the transform size restarts the session, and a "before"
+    /// trace that vanished at that moment would be useless.
+    let traceStore = TraceStore()
+
+    func refreshTraces() {
+        traces = traceStore.traces()
+    }
+
+    func captureTrace() {
+        guard let session else { return }
+        guard session.captureTrace(into: traceStore, named: nil) != nil else {
+            errorMessage = "Nothing has been analysed yet to store as a trace."
+            return
+        }
+        refreshTraces()
+        errorMessage = nil
+    }
+
+    func setTraceVisible(_ index: Int, _ visible: Bool) {
+        traceStore.setVisible(index, visible)
+        refreshTraces()
+    }
+
+    func removeTrace(_ index: Int) {
+        traceStore.remove(index)
+        refreshTraces()
+    }
+
+    func clearTraces() {
+        traceStore.removeAll()
+        refreshTraces()
     }
 
     // ----------------------------------------------------------- optimiser -

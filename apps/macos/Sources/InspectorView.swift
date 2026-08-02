@@ -16,6 +16,7 @@ struct InspectorView: View {
             case .rta: rta
             case .transfer: transfer
             case .equaliser: EqualiserInspector(model: model)
+            case .traces: TracesInspector(model: model)
             }
         }
         .formStyle(.grouped)

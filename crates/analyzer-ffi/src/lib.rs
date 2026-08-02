@@ -45,7 +45,8 @@ use analyzer_engine::{
 };
 use analyzer_model::settings::{AveragingChoice, WindowChoice};
 use analyzer_model::{
-    FilterFormat, Measurement, MeasurementData, MeasurementId, References, Settings,
+    FilterFormat, Measurement, MeasurementData, MeasurementId, MeasurementStore, References,
+    Settings,
 };
 use analyzer_plot::{
     FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
@@ -2829,6 +2830,361 @@ pub unsafe extern "C" fn analyzer_session_copy_target(
 }
 
 // ---------------------------------------------------------------------------
+// Captured traces
+//
+// The store is a separate handle rather than part of a session, because the
+// whole point of a captured trace is to compare it against something measured
+// later — including after a change that restarts the session. Transform size,
+// window and averaging all restart it, and holding traces inside would mean
+// capturing a "before" curve and then losing it the moment you changed the
+// setting you wanted to compare.
+//
+// Traces are stored as measurements at analysis resolution, not as the pixel
+// columns they were drawn as. Storing the reduced curve would be storing a
+// picture: it would stretch rather than re-reduce when the window resized, and
+// a trace captured at one axis range would be wrong at any other.
+// ---------------------------------------------------------------------------
+
+/// How a captured trace is drawn.
+#[derive(Debug, Clone, Copy)]
+struct CapturedTrace {
+    id: MeasurementId,
+    visible: bool,
+    /// Index into a palette the platform layer owns. The core does not know
+    /// what colour this is, only that two traces should not share one.
+    colour: u32,
+}
+
+/// Captured curves, held independently of any session.
+pub struct AnalyzerTraceStore {
+    measurements: MeasurementStore,
+    display: Vec<CapturedTrace>,
+    /// Next palette index to hand out. Monotonic, so two traces captured either
+    /// side of a deletion do not end up the same colour.
+    next_colour: u32,
+    /// Scratch for reduction, reused so drawing does not allocate per frame.
+    reduced: Trace,
+    bins: Vec<f32>,
+}
+
+impl std::fmt::Debug for AnalyzerTraceStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnalyzerTraceStore")
+            .field("count", &self.display.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Longest trace name carried across the boundary, including the terminator.
+pub const ANALYZER_TRACE_NAME_LEN: usize = 128;
+
+/// A captured trace, as the UI sees it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerTraceInfo {
+    /// NUL-terminated name.
+    pub name: [c_char; ANALYZER_TRACE_NAME_LEN],
+    /// Whether it is drawn.
+    pub visible: bool,
+    /// Palette index chosen when it was captured.
+    pub colour: u32,
+    /// Points stored, at analysis resolution.
+    pub points: usize,
+    /// Rate it was captured at.
+    pub sample_rate: f32,
+    /// Spacing between stored bins, in hertz.
+    pub bin_spacing_hz: f32,
+}
+
+impl Default for AnalyzerTraceInfo {
+    fn default() -> Self {
+        Self {
+            name: [0; ANALYZER_TRACE_NAME_LEN],
+            visible: false,
+            colour: 0,
+            points: 0,
+            sample_rate: 0.0,
+            bin_spacing_hz: 0.0,
+        }
+    }
+}
+
+/// Create a trace store. Outlives any session; destroy it with
+/// [`analyzer_trace_store_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_trace_store_create() -> *mut AnalyzerTraceStore {
+    Box::into_raw(Box::new(AnalyzerTraceStore {
+        measurements: MeasurementStore::new(),
+        display: Vec::new(),
+        next_colour: 0,
+        reduced: Trace::default(),
+        bins: Vec::new(),
+    }))
+}
+
+/// Release a trace store. Safe to call with null.
+///
+/// # Safety
+///
+/// `store` must come from [`analyzer_trace_store_create`] and not already be
+/// destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_destroy(store: *mut AnalyzerTraceStore) {
+    if store.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(store) });
+}
+
+/// Capture the session's live curve into the store.
+///
+/// Returns its index, or -1 when there is nothing analysed yet. `name` may be
+/// null, in which case a unique one is generated.
+///
+/// # Safety
+///
+/// `store` and `session` must be null or live. `name` must be null or a
+/// NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_capture(
+    store: *mut AnalyzerTraceStore,
+    session: *mut AnalyzerSession,
+    name: *const c_char,
+) -> isize {
+    if store.is_null() || session.is_null() {
+        return -1;
+    }
+    guard(-1, || {
+        let store = unsafe { &mut *store };
+        let session = unsafe { &mut *session };
+
+        let (magnitude_db, bin_spacing_hz, sample_rate) = {
+            let frame = session.engine.latest();
+            (
+                frame
+                    .bins
+                    .iter()
+                    .map(|db| f64::from(*db))
+                    .collect::<Vec<f64>>(),
+                f64::from(frame.bin_spacing_hz),
+                f64::from(frame.sample_rate),
+            )
+        };
+        if magnitude_db.is_empty() {
+            return -1;
+        }
+
+        let requested = if name.is_null() {
+            None
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(name) }
+                .to_str()
+                .ok()
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let label = store
+            .measurements
+            .unique_name(requested.as_deref().unwrap_or("Trace"));
+
+        let measurement = Measurement::new(
+            MeasurementId(0),
+            label,
+            sample_rate,
+            MeasurementData::PowerSpectrum {
+                magnitude_db,
+                bin_spacing_hz,
+            },
+        );
+
+        let id = store.measurements.add(measurement);
+        let colour = store.next_colour;
+        store.next_colour = store.next_colour.wrapping_add(1);
+        store.display.push(CapturedTrace {
+            id,
+            visible: true,
+            colour,
+        });
+        (store.display.len() - 1) as isize
+    })
+}
+
+/// How many traces are held.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_count(store: *const AnalyzerTraceStore) -> usize {
+    if store.is_null() {
+        return 0;
+    }
+    guard(0, || unsafe { (*store).display.len() })
+}
+
+/// Describe one trace.
+///
+/// # Safety
+///
+/// `store` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_info(
+    store: *const AnalyzerTraceStore,
+    index: usize,
+    out: *mut AnalyzerTraceInfo,
+) -> bool {
+    if store.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &*store };
+        let Some(display) = store.display.get(index) else {
+            return false;
+        };
+        let Some(measurement) = store.measurements.get(display.id) else {
+            return false;
+        };
+
+        let mut info = AnalyzerTraceInfo {
+            visible: display.visible,
+            colour: display.colour,
+            points: measurement.data.len(),
+            sample_rate: measurement.sample_rate as f32,
+            bin_spacing_hz: measurement.data.bin_spacing_hz().unwrap_or(0.0) as f32,
+            ..AnalyzerTraceInfo::default()
+        };
+        write_c_string(&mut info.name, &measurement.name);
+        unsafe { ptr::write(out, info) };
+        true
+    })
+}
+
+/// Show or hide a trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_set_visible(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+    visible: bool,
+) -> bool {
+    if store.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &mut *store };
+        match store.display.get_mut(index) {
+            Some(display) => {
+                display.visible = visible;
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Forget a trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_remove(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+) -> bool {
+    if store.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &mut *store };
+        if index >= store.display.len() {
+            return false;
+        }
+        let display = store.display.remove(index);
+        store.measurements.remove(display.id);
+        true
+    })
+}
+
+/// Forget every trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_clear(store: *mut AnalyzerTraceStore) {
+    if store.is_null() {
+        return;
+    }
+    guard((), || {
+        let store = unsafe { &mut *store };
+        store.display.clear();
+        store.measurements.clear();
+    })
+}
+
+/// Copy a captured trace, reduced onto the session's current axis.
+///
+/// The session supplies only the geometry. A trace captured at one transform
+/// size draws correctly against a session running at another, which is the
+/// point of storing it at analysis resolution.
+///
+/// # Safety
+///
+/// `store` and `session` must be null or live. `out` must point to `capacity`
+/// writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_copy(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+    session: *const AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if store.is_null() || session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let store = unsafe { &mut *store };
+        let session = unsafe { &*session };
+
+        let Some(display) = store.display.get(index).copied() else {
+            return 0;
+        };
+        let Some(measurement) = store.measurements.get(display.id) else {
+            return 0;
+        };
+        let Some(levels) = measurement.data.magnitude_db() else {
+            return 0;
+        };
+        let Some(spacing) = measurement.data.bin_spacing_hz() else {
+            return 0;
+        };
+
+        store.bins.clear();
+        store.bins.extend(levels.iter().map(|db| *db as f32));
+
+        let columns = session.columns.min(capacity);
+        reduce(
+            &store.bins,
+            spacing as f32,
+            &session.frequency,
+            columns,
+            session.reduction,
+            &mut store.reduced,
+        );
+
+        let written = store.reduced.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(store.reduced.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Automatic equalisation
 // ---------------------------------------------------------------------------
 
@@ -3682,6 +4038,63 @@ mod tests {
             analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
         });
         assert_ne!(status.code, 0);
+    }
+
+    // ------------------------------------------------------------ traces --
+
+    #[test]
+    fn trace_calls_tolerate_null_handles() {
+        let mut info = AnalyzerTraceInfo::default();
+        assert_eq!(
+            unsafe { analyzer_trace_store_capture(ptr::null_mut(), ptr::null_mut(), ptr::null()) },
+            -1
+        );
+        assert_eq!(unsafe { analyzer_trace_store_count(ptr::null()) }, 0);
+        assert!(!unsafe { analyzer_trace_store_info(ptr::null(), 0, &mut info) });
+        assert!(!unsafe { analyzer_trace_store_set_visible(ptr::null_mut(), 0, true) });
+        assert!(!unsafe { analyzer_trace_store_remove(ptr::null_mut(), 0) });
+        unsafe { analyzer_trace_store_clear(ptr::null_mut()) };
+        unsafe { analyzer_trace_store_destroy(ptr::null_mut()) };
+        assert_eq!(
+            unsafe {
+                analyzer_trace_store_copy(ptr::null_mut(), 0, ptr::null(), ptr::null_mut(), 0)
+            },
+            0
+        );
+    }
+
+    /// The store has its own lifetime precisely so it can be exercised without
+    /// a device, and so a trace survives the session that captured it.
+    #[test]
+    fn an_empty_store_reports_empty_and_refuses_bad_indices() {
+        let store = analyzer_trace_store_create();
+        assert!(!store.is_null());
+
+        let mut info = AnalyzerTraceInfo::default();
+        assert_eq!(unsafe { analyzer_trace_store_count(store) }, 0);
+        assert!(!unsafe { analyzer_trace_store_info(store, 0, &mut info) });
+        assert!(!unsafe { analyzer_trace_store_set_visible(store, 3, true) });
+        assert!(!unsafe { analyzer_trace_store_remove(store, 3) });
+        unsafe { analyzer_trace_store_clear(store) };
+
+        // Capturing needs a session; without one there is nothing to store.
+        assert_eq!(
+            unsafe { analyzer_trace_store_capture(store, ptr::null_mut(), ptr::null()) },
+            -1
+        );
+
+        unsafe { analyzer_trace_store_destroy(store) };
+    }
+
+    /// Trace names cross the boundary in an inline buffer, so a long one must
+    /// truncate on a character boundary rather than corrupt the string.
+    #[test]
+    fn a_long_trace_name_truncates_safely() {
+        let mut info = AnalyzerTraceInfo::default();
+        write_c_string(&mut info.name, &"é".repeat(200));
+        let read = read_c_string(&info.name);
+        assert!(read.chars().all(|c| c == 'é'), "got {read:?}");
+        assert!(read.len() < ANALYZER_TRACE_NAME_LEN);
     }
 
     // --------------------------------------------------------- optimiser --

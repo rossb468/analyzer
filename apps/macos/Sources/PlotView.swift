@@ -2,6 +2,15 @@ import SwiftUI
 import MetalKit
 import AnalyzerFFI
 
+extension Array {
+    /// The element at `index`, or nil. The renderer's layer slots outnumber the
+    /// captured traces most of the time, and a slot with nothing to draw is the
+    /// normal case rather than a bug.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 /// Hosts an `MTKView` and drives it from the model.
 struct SpectrumView: NSViewRepresentable {
     @ObservedObject var model: AnalyzerModel
@@ -64,10 +73,30 @@ struct SpectrumView: NSViewRepresentable {
                 }
             }
 
+            // Captured traces sit under everything live. A fixed number of
+            // slots, because the layer list is built once here and a trace
+            // captured later has to have somewhere to go; slot N draws the Nth
+            // trace in the list and takes the colour the core gave it.
+            let capturedLayers = (0..<AnalyzerModel.maxTraces).map { slot in
+                layer(
+                    colour: AnalyzerModel.traceColour(self.model.traces[safe: slot]?.colour ?? 0),
+                    range: levelRange
+                ) { session, columns in
+                    guard let trace = self.model.traces[safe: slot], trace.visible else {
+                        return [][...]
+                    }
+                    return session.copyCapturedTrace(
+                        trace.index,
+                        from: self.model.traceStore,
+                        columns: columns
+                    )
+                }
+            }
+
             // Back to front. The long-term average sits under the live trace,
             // and coherence sits under everything because it is context for the
             // curve above it rather than the thing being read.
-            renderer.layers = [
+            renderer.layers = capturedLayers + [
                 layer(colour: SIMD4(0.55, 0.55, 0.62, 0.55), range: (0, 1)) { session, columns in
                     guard self.model.mode == AnalyzerMode_Transfer, self.model.showCoherence else {
                         return [][...]
@@ -128,7 +157,7 @@ struct SpectrumView: NSViewRepresentable {
         /// Build a layer that only runs while a session exists, and that
         /// re-declares the plot geometry the first time the width changes.
         private func layer(
-            colour: SIMD4<Float>,
+            colour: @escaping @autoclosure () -> SIMD4<Float>,
             range: (min: Float, max: Float),
             body: @escaping (AnalyzerSessionHandle, Int) -> ArraySlice<Float>
         ) -> SpectrumRenderer.Layer {
