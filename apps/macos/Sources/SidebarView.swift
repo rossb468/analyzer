@@ -11,7 +11,7 @@ struct SidebarView: View {
     @ObservedObject var model: AnalyzerModel
 
     var body: some View {
-        List(selection: $model.section) {
+        List(selection: selection) {
             Section("Analysis") {
                 ForEach(AppSection.analysis) { row($0) }
             }
@@ -23,10 +23,32 @@ struct SidebarView: View {
         .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 240)
     }
 
+    /// An explicitly optional binding, which is what makes the rows clickable.
+    ///
+    /// `List` takes its single selection as `Binding<SelectionValue?>`. Handing
+    /// it the model's non-optional `section` compiles - the binding is promoted
+    /// - but promotes `SelectionValue` to `AppSection?` along with it, and every
+    /// row is tagged with a plain `AppSection`. The tags then match nothing and
+    /// no row is selectable, silently.
+    ///
+    /// Writing the optional out here pins `SelectionValue` to `AppSection`.
+    /// A nil write is ignored rather than stored: clicking the empty space below
+    /// the list should not leave the app with no tool selected.
+    private var selection: Binding<AppSection?> {
+        Binding(
+            get: { model.section },
+            set: { newValue in
+                if let newValue {
+                    model.section = newValue
+                }
+            }
+        )
+    }
+
     private func row(_ section: AppSection) -> some View {
         Label(section.title, systemImage: section.symbol)
-            .tag(section)
             .badge(badge(for: section))
+            .tag(section)
     }
 
     /// A short status for sections doing something worth noticing from
