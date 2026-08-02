@@ -43,7 +43,9 @@ use analyzer_engine::{
     snapshot_channel,
 };
 use analyzer_model::settings::{AveragingChoice, WindowChoice};
-use analyzer_model::{Measurement, MeasurementData, MeasurementId, References, Settings};
+use analyzer_model::{
+    FilterFormat, Measurement, MeasurementData, MeasurementId, References, Settings,
+};
 use analyzer_plot::{
     FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
 };
@@ -2491,6 +2493,91 @@ pub unsafe extern "C" fn analyzer_level_ticks(
 }
 
 // ---------------------------------------------------------------------------
+// Filter export
+// ---------------------------------------------------------------------------
+
+/// A format the equaliser can be written as.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzerFilterFormat {
+    /// REW's own filter settings text.
+    Rew = 0,
+    /// An Equalizer APO configuration.
+    EqualizerApo = 1,
+    /// miniDSP biquad coefficients.
+    MiniDsp = 2,
+}
+
+impl From<AnalyzerFilterFormat> for FilterFormat {
+    fn from(value: AnalyzerFilterFormat) -> Self {
+        match value {
+            AnalyzerFilterFormat::Rew => FilterFormat::Rew,
+            AnalyzerFilterFormat::EqualizerApo => FilterFormat::EqualizerApo,
+            AnalyzerFilterFormat::MiniDsp => FilterFormat::MiniDsp,
+        }
+    }
+}
+
+/// Write the active equaliser to `path` in `format`.
+///
+/// Fails when no equaliser is active, rather than writing an empty file that
+/// looks like a successful export of nothing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `path` must be a NUL-terminated C string.
+/// `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_export_filters(
+    session: *const AnalyzerSession,
+    format: AnalyzerFilterFormat,
+    path: *const c_char,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        let Some(eq) = unsafe { &*session }.equaliser() else {
+            unsafe { set_status(status, AnalyzerStatus::failure("no equaliser is active")) };
+            return false;
+        };
+
+        let text = analyzer_model::filter_export::to_text(
+            format.into(),
+            eq.bands(),
+            eq.preamp_db(),
+            eq.sample_rate(),
+        );
+
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 //
 // Preferences live in the core rather than in the platform's own defaults
@@ -3093,6 +3180,38 @@ mod tests {
         );
         assert_eq!(align_of::<AnalyzerStatus>(), 4);
         assert!(size_of::<AnalyzerFrameInfo>() >= 24);
+    }
+
+    /// Exporting with no equaliser running must say so rather than leave an
+    /// empty file that looks like a successful export of nothing.
+    #[test]
+    fn exporting_filters_without_a_session_reports_rather_than_writes() {
+        let path = std::env::temp_dir().join("analyzer-ffi-no-session.txt");
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe {
+            analyzer_session_export_filters(
+                ptr::null(),
+                AnalyzerFilterFormat::Rew,
+                c.as_ptr(),
+                &mut status,
+            )
+        });
+        assert_ne!(status.code, 0);
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn filter_format_codes_are_stable() {
+        assert_eq!(AnalyzerFilterFormat::Rew as u32, 0);
+        assert_eq!(AnalyzerFilterFormat::EqualizerApo as u32, 1);
+        assert_eq!(AnalyzerFilterFormat::MiniDsp as u32, 2);
+        assert_eq!(
+            FilterFormat::from(AnalyzerFilterFormat::MiniDsp),
+            FilterFormat::MiniDsp
+        );
     }
 
     // ----------------------------------------------------------- settings --

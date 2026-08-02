@@ -68,6 +68,7 @@ dependencies = [
 name = "analyzer-model"
 version = "0.1.0"
 dependencies = [
+ "analyzer-dsp",
  "rustfft",
 ]
 

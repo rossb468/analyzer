@@ -11,4 +11,5 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+analyzer-dsp = { workspace = true }
 rustfft = { workspace = true }

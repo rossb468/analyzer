@@ -355,6 +355,60 @@ final class AnalyzerModel: ObservableObject {
         refreshEq()
     }
 
+    /// Ask for a location and write the equaliser there.
+    ///
+    /// The formats differ in what they can carry, and the panel says so: a
+    /// parametric target redesigns the filters itself, while miniDSP gets
+    /// coefficients designed at this session's sample rate and is only correct
+    /// on a device running at that rate.
+    func exportFilters(_ format: AnalyzerFilterFormat) {
+        guard let session else { return }
+
+        let panel = NSSavePanel()
+        panel.title = "Export filters"
+        panel.nameFieldStringValue = Self.filterFileName(format)
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.message = Self.filterAdvice(format, sampleRate: displayRate)
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try session.exportFilters(format, to: url)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private static func filterFileName(_ format: AnalyzerFilterFormat) -> String {
+        switch format {
+        case AnalyzerFilterFormat_EqualizerApo: "config.txt"
+        case AnalyzerFilterFormat_MiniDsp: "biquads.txt"
+        default: "filters.txt"
+        }
+    }
+
+    private static func filterAdvice(_ format: AnalyzerFilterFormat, sampleRate: Double) -> String {
+        switch format {
+        case AnalyzerFilterFormat_EqualizerApo:
+            """
+            Equalizer APO reads this as a config.txt. The trim is written as its \
+            Preamp line.
+            """
+        case AnalyzerFilterFormat_MiniDsp:
+            """
+            Coefficients are designed for \(Int(sampleRate)) Hz and are only \
+            correct on a device running at that rate. The trim is folded into \
+            the first biquad, because the format has nowhere else to put it.
+            """
+        default:
+            """
+            REW imports this under Equaliser: Generic. The trim is a note in the \
+            header, not a filter.
+            """
+        }
+    }
+
     /// A stimulus turning on or off changes whether an output stream exists,
     /// which is a device operation; anything else is a live change the audio
     /// thread picks up on its next callback.

@@ -72,6 +72,21 @@ struct EqualiserInspector: View {
                 .help("Draw the measurement with the equaliser applied, beside the raw one.")
                 .disabled(model.eqMode == AnalyzerEqMode_Off)
         }
+
+        Section("Export") {
+            // The point of designing a correction against a measurement is to
+            // load it into whatever will actually apply it.
+            Menu {
+                Button("REW filter settings…") { model.exportFilters(AnalyzerFilterFormat_Rew) }
+                Button("Equalizer APO…") {
+                    model.exportFilters(AnalyzerFilterFormat_EqualizerApo)
+                }
+                Button("miniDSP biquads…") { model.exportFilters(AnalyzerFilterFormat_MiniDsp) }
+            } label: {
+                Label("Export filters", systemImage: "square.and.arrow.up")
+            }
+            .disabled(model.eqMode == AnalyzerEqMode_Off || !model.isRunning)
+        }
     }
 }
 

@@ -482,6 +482,19 @@ final class AnalyzerSessionHandle {
         return correctedStorage[0..<written]
     }
 
+    /// Write the active equaliser out in `format`.
+    ///
+    /// - Throws: [`AnalyzerError`] with whatever the core reported, which is
+    ///   either a filesystem problem or the equaliser being off.
+    func exportFilters(_ format: AnalyzerFilterFormat, to url: URL) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var status = AnalyzerStatus()
+        let ok = url.path.withCString { path in
+            analyzer_session_export_filters(handle, format, path, &status)
+        }
+        guard ok else { throw AnalyzerError.failed(Self.message(from: status)) }
+    }
+
     /// Restart the long-term average without disturbing the live trace.
     func resetAverage() {
         guard let handle else { return }
