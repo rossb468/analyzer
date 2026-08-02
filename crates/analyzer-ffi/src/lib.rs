@@ -36,8 +36,8 @@ use analyzer_audio::{
 };
 use analyzer_dsp::target::{ALIGN_FROM_HZ, ALIGN_TO_HZ};
 use analyzer_dsp::{
-    Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator, Overlap,
-    Signal, SpectrumConfig, TargetCurve, TargetShape, WindowKind,
+    Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator,
+    OptimiserConfig, Overlap, Signal, SpectrumConfig, TargetCurve, TargetShape, WindowKind,
 };
 use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
@@ -1557,29 +1557,39 @@ impl AnalyzerSession {
         self.target.set_offset_db(wanted.offset_db);
     }
 
-    /// Align the target to the latest analysed frame.
-    fn align_target(&mut self) -> bool {
+    /// The latest measurement sampled at the frequencies the plot draws at.
+    ///
+    /// Both alignment and the fit work from this rather than from raw bins, so
+    /// what they operate on is what is on screen, and the points are
+    /// log-spaced - which is what makes every octave carry equal weight in the
+    /// fit rather than the top one dominating.
+    fn measured_at_columns(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
         let columns = self.columns;
         self.columns_hz(columns);
 
-        let levels: Vec<f32> = {
-            let frame = self.engine.latest();
-            if frame.bins.is_empty() {
-                return false;
-            }
-            // Evaluate the measurement at the same frequencies the target is
-            // drawn at, so the alignment matches what is on screen.
-            self.column_hz
-                .iter()
-                .take(columns)
-                .map(|hz| {
-                    let bin = (hz / frame.bin_spacing_hz).round() as usize;
-                    frame.bins.get(bin).copied().unwrap_or(f32::NAN)
-                })
-                .collect()
-        };
+        let frame = self.engine.latest();
+        if frame.bins.is_empty() {
+            return None;
+        }
+        let levels: Vec<f32> = self
+            .column_hz
+            .iter()
+            .take(columns)
+            .map(|hz| {
+                let bin = (hz / frame.bin_spacing_hz).round() as usize;
+                frame.bins.get(bin).copied().unwrap_or(f32::NAN)
+            })
+            .collect();
 
         let frequencies: Vec<f32> = self.column_hz.iter().take(columns).copied().collect();
+        Some((frequencies, levels))
+    }
+
+    /// Align the target to the latest analysed frame.
+    fn align_target(&mut self) -> bool {
+        let Some((frequencies, levels)) = self.measured_at_columns() else {
+            return false;
+        };
         self.target
             .align_to(&frequencies, &levels, ALIGN_FROM_HZ, ALIGN_TO_HZ);
         true
@@ -2819,6 +2829,153 @@ pub unsafe extern "C" fn analyzer_session_copy_target(
 }
 
 // ---------------------------------------------------------------------------
+// Automatic equalisation
+// ---------------------------------------------------------------------------
+
+/// How the automatic fit is constrained.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerOptimiserConfig {
+    /// Most filters to produce.
+    pub max_filters: u32,
+    /// Low end of the corrected band, in hertz.
+    pub from_hz: f32,
+    /// High end of the corrected band, in hertz.
+    pub to_hz: f32,
+    /// Largest boost any one filter may apply.
+    ///
+    /// Deliberately much smaller than the cut limit by default: a dip in a room
+    /// measurement is usually a cancellation, and boosting one burns headroom
+    /// without filling it in.
+    pub max_boost_db: f32,
+    /// Largest cut any one filter may apply.
+    pub max_cut_db: f32,
+    /// Widest filter allowed.
+    pub min_q: f32,
+    /// Narrowest filter allowed.
+    pub max_q: f32,
+    /// Errors smaller than this are left alone.
+    pub threshold_db: f32,
+}
+
+impl From<AnalyzerOptimiserConfig> for OptimiserConfig {
+    fn from(value: AnalyzerOptimiserConfig) -> Self {
+        Self {
+            max_filters: value.max_filters as usize,
+            from_hz: value.from_hz,
+            to_hz: value.to_hz,
+            max_boost_db: value.max_boost_db,
+            max_cut_db: value.max_cut_db,
+            min_q: value.min_q,
+            max_q: value.max_q,
+            threshold_db: value.threshold_db,
+            // Set by the session, which is the only thing that knows the rate.
+            sample_rate: 48_000.0,
+        }
+    }
+}
+
+/// What a fit produced.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerOptimisation {
+    /// Filters placed.
+    pub band_count: u32,
+    /// RMS error across the corrected band before any filter.
+    pub initial_error_db: f32,
+    /// RMS error after every filter.
+    pub final_error_db: f32,
+}
+
+/// The fit constraints a fresh session starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_optimiser_config_default() -> AnalyzerOptimiserConfig {
+    let defaults = OptimiserConfig::default();
+    AnalyzerOptimiserConfig {
+        max_filters: defaults.max_filters as u32,
+        from_hz: defaults.from_hz,
+        to_hz: defaults.to_hz,
+        max_boost_db: defaults.max_boost_db,
+        max_cut_db: defaults.max_cut_db,
+        min_q: defaults.min_q,
+        max_q: defaults.max_q,
+        threshold_db: defaults.threshold_db,
+    }
+}
+
+/// Fit filters to the gap between the measurement and the target.
+///
+/// The result **replaces** the parametric equaliser's bands and selects it, so
+/// the fit is immediately drawn and heard. Replacing rather than appending is
+/// deliberate: running the fit twice should give the same answer as running it
+/// once, and appending would instead correct the correction.
+///
+/// # Safety
+///
+/// `session` must be null or live. `config` must be readable. `out` must be
+/// null or writable. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_optimise(
+    session: *mut AnalyzerSession,
+    config: *const AnalyzerOptimiserConfig,
+    out: *mut AnalyzerOptimisation,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || config.is_null() {
+        unsafe {
+            set_status(
+                status,
+                AnalyzerStatus::failure("null session or configuration"),
+            )
+        };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let mut settings: OptimiserConfig = unsafe { *config }.into();
+        settings.sample_rate = session.parametric.sample_rate();
+
+        let Some((frequencies, levels)) = session.measured_at_columns() else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("nothing has been captured yet to correct"),
+                );
+            }
+            return false;
+        };
+
+        // A target sitting at the wrong absolute level would make every error
+        // the fit sees a constant offset, and it would spend its filters on
+        // that rather than on the room.
+        session
+            .target
+            .align_to(&frequencies, &levels, ALIGN_FROM_HZ, ALIGN_TO_HZ);
+
+        let result = analyzer_dsp::optimise(&frequencies, &levels, &session.target, &settings);
+
+        session.parametric.set_bands(result.bands.clone());
+        session.eq_mode = AnalyzerEqMode::Parametric;
+        session.publish_eq();
+
+        if !out.is_null() {
+            unsafe {
+                ptr::write(
+                    out,
+                    AnalyzerOptimisation {
+                        band_count: result.bands.len() as u32,
+                        initial_error_db: result.initial_error_db,
+                        final_error_db: result.final_error_db,
+                    },
+                );
+            }
+        }
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Filter export
 // ---------------------------------------------------------------------------
 
@@ -3525,6 +3682,38 @@ mod tests {
             analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
         });
         assert_ne!(status.code, 0);
+    }
+
+    // --------------------------------------------------------- optimiser --
+
+    #[test]
+    fn optimising_without_a_session_reports_rather_than_crashes() {
+        let config = analyzer_optimiser_config_default();
+        let mut result = AnalyzerOptimisation::default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe {
+            analyzer_session_optimise(ptr::null_mut(), &config, &mut result, &mut status)
+        });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe {
+            analyzer_session_optimise(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        });
+    }
+
+    /// The defaults encode the rule that matters: boosting a null burns
+    /// headroom without filling it, so boost is capped far below cut.
+    #[test]
+    fn the_default_fit_caps_boost_well_below_cut() {
+        let config = analyzer_optimiser_config_default();
+        assert!(config.max_boost_db < config.max_cut_db);
+        assert!(config.max_filters > 0);
+        assert!(config.to_hz > config.from_hz);
+        assert!(config.max_q > config.min_q);
     }
 
     #[test]

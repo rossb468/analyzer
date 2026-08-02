@@ -528,6 +528,24 @@ final class AnalyzerSessionHandle {
         return targetStorage[0..<written]
     }
 
+    /// Fit filters to the gap between the measurement and the target.
+    ///
+    /// Replaces the parametric equaliser's bands and selects it, so the fit is
+    /// immediately drawn and heard.
+    ///
+    /// - Throws: [`AnalyzerError`] when there is nothing captured to correct.
+    @discardableResult
+    func optimise(_ config: AnalyzerOptimiserConfig) throws -> AnalyzerOptimisation {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var settings = config
+        var result = AnalyzerOptimisation()
+        var status = AnalyzerStatus()
+        guard analyzer_session_optimise(handle, &settings, &result, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+        return result
+    }
+
     /// Write the active equaliser out in `format`.
     ///
     /// - Throws: [`AnalyzerError`] with whatever the core reported, which is

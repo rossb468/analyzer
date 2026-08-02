@@ -307,6 +307,7 @@ final class AnalyzerModel: ObservableObject {
     /// hoping the two stay in step is how a fader ends up controlling the wrong
     /// filter.
     private func applyEqMode() {
+        guard !suppressEqModePush else { return }
         session?.setEqMode(eqMode)
         refreshEq()
     }
@@ -356,6 +357,47 @@ final class AnalyzerModel: ObservableObject {
         session?.trimEq()
         refreshEq()
     }
+
+    // ----------------------------------------------------------- optimiser -
+
+    /// How the automatic fit is constrained. Mirrored from the core.
+    @Published var optimiser = analyzer_optimiser_config_default()
+    /// Result of the last fit, for the readout.
+    @Published var optimisation: AnalyzerOptimisation?
+
+    /// Fit filters to the gap between the measurement and the target.
+    ///
+    /// The core replaces the parametric bands and selects that equaliser, so
+    /// everything mirrored here has to be re-read rather than assumed.
+    func runOptimiser() {
+        guard let session else { return }
+        do {
+            optimisation = try session.optimise(optimiser)
+            eqModeWithoutApplying = AnalyzerEqMode_Parametric
+            refreshEq()
+            refreshTarget()
+            showTarget = true
+            errorMessage = nil
+        } catch {
+            optimisation = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Update the mirrored equaliser mode without pushing it back.
+    ///
+    /// The core has already changed mode; writing it back would be a redundant
+    /// round trip that also resets the bands the fit just placed.
+    private var eqModeWithoutApplying: AnalyzerEqMode {
+        get { eqMode }
+        set {
+            suppressEqModePush = true
+            eqMode = newValue
+            suppressEqModePush = false
+        }
+    }
+
+    private var suppressEqModePush = false
 
     // -------------------------------------------------------------- target -
 
