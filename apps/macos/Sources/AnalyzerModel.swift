@@ -180,6 +180,11 @@ final class AnalyzerModel: ObservableObject {
         }
     }
 
+    /// Name of the selected device, usable before a session has started.
+    var selectedDeviceName: String {
+        devices.first { $0.uid == selectedDeviceUID }?.name ?? "the selected input"
+    }
+
     /// Whether the selected device can play a stimulus.
     ///
     /// CoreAudio drives one device from one IOProc, so playing and capturing
@@ -204,10 +209,14 @@ final class AnalyzerModel: ObservableObject {
         if reference == AnalyzerReference_Internal {
             if !canPlay {
                 return """
-                    This device has no output. A transfer function against an \
-                    internal reference has to play the stimulus itself — create \
-                    an aggregate device in Audio MIDI Setup combining your input \
-                    and output, and select it here.
+                    A transfer function against an internal reference plays the \
+                    stimulus itself, so it needs a device that can play as well \
+                    as record. “\(selectedDeviceName)” can only record.
+
+                    macOS drives one device per audio callback, so both \
+                    directions have to go through the same one. Combine your \
+                    microphone and your speakers into an Aggregate Device in \
+                    Audio MIDI Setup, then choose that device in the toolbar.
                     """
             }
             if signal == AnalyzerSignal_Silence {
@@ -219,8 +228,9 @@ final class AnalyzerModel: ObservableObject {
             }
         } else if inputChannels < 2 {
             return """
-                This device has one input channel, so there is nowhere to wire a \
-                loopback. Use an internal reference instead.
+                A loopback reference is carried on a second input channel, and \
+                “\(selectedDeviceName)” has only one. Use an internal reference \
+                instead, or select a device with two inputs.
                 """
         }
         return nil

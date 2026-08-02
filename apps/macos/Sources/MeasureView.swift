@@ -77,6 +77,12 @@ struct MeasureInspector: View {
             }
         }
 
+        if !model.canPlay {
+            Section {
+                OutputHint(model: model, needs: "Measuring")
+            }
+        }
+
         Section {
             if model.isMeasuring {
                 VStack(alignment: .leading, spacing: 6) {
@@ -90,12 +96,7 @@ struct MeasureInspector: View {
                     Label("Measure", systemImage: "dot.radiowaves.left.and.right")
                 }
                 .disabled(!model.isRunning || !model.canPlay)
-                .help(model.canPlay
-                      ? "Play a sweep and measure the response."
-                      : """
-                        This device has no output. Create an aggregate device in \
-                        Audio MIDI Setup to play and capture together.
-                        """)
+                .help("Play a sweep and measure the response.")
             }
         }
 

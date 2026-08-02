@@ -147,8 +147,9 @@ struct ContentView: View {
         .help(model.canPlay
               ? "Stimulus played out of the selected device."
               : """
-                This device has no output. Create an aggregate device in Audio \
-                MIDI Setup to play and capture together.
+                “\(model.selectedDeviceName)” can only record. The stimulus and \
+                the recording go through one device, so playing needs an \
+                Aggregate Device combining your microphone and speakers.
                 """)
     }
 

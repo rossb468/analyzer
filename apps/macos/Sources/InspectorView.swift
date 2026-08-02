@@ -65,6 +65,12 @@ struct InspectorView: View {
 
     @ViewBuilder
     private var transfer: some View {
+        if !model.canPlay && model.reference == AnalyzerReference_Internal {
+            Section {
+                OutputHint(model: model, needs: "An internal reference")
+            }
+        }
+
         Section("Reference") {
             Picker("Source", selection: $model.reference) {
                 Text("Internal").tag(AnalyzerReference_Internal)
