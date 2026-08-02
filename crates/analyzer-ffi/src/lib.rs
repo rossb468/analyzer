@@ -42,7 +42,8 @@ use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
     snapshot_channel,
 };
-use analyzer_model::{Measurement, MeasurementData, MeasurementId, References};
+use analyzer_model::settings::{AveragingChoice, WindowChoice};
+use analyzer_model::{Measurement, MeasurementData, MeasurementId, References, Settings};
 use analyzer_plot::{
     FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
 };
@@ -2489,6 +2490,264 @@ pub unsafe extern "C" fn analyzer_level_ticks(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Settings
+//
+// Preferences live in the core rather than in the platform's own defaults
+// store, so their validation and their file format are written once. The
+// platform supplies only the location - which directory a preferences file
+// belongs in is genuinely a platform question, and the one part of this that
+// Windows and Linux will answer differently.
+// ---------------------------------------------------------------------------
+
+/// Longest path [`AnalyzerSettings`] can carry, including the terminator.
+pub const ANALYZER_PATH_LEN: usize = 1024;
+
+/// Program settings, as a flat POD struct.
+///
+/// The optional SPL offset is split into a flag and a value rather than using a
+/// sentinel, because every sentinel worth choosing is a level someone could
+/// legitimately measure.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerSettings {
+    /// Transform size a new session starts with.
+    pub fft_size: u32,
+    /// Window a new session starts with.
+    pub window: AnalyzerWindow,
+    /// Averaging a new session starts with.
+    pub averaging: AnalyzerAveraging,
+    /// Whether to start capturing as soon as the window opens.
+    pub start_on_launch: bool,
+    /// Low end of the frequency axis, in hertz.
+    pub min_hz: f32,
+    /// High end of the frequency axis, in hertz.
+    pub max_hz: f32,
+    /// Bottom of the level axis, in decibels.
+    pub min_db: f32,
+    /// Top of the level axis, in decibels.
+    pub max_db: f32,
+    /// Spacing of the horizontal gridlines, in decibels.
+    pub level_grid_step: f32,
+    /// Whether an SPL calibration has ever been measured.
+    pub has_spl_offset: bool,
+    /// Offset from dBFS to dB SPL. Meaningless unless `has_spl_offset`.
+    pub spl_offset_db: f32,
+    /// NUL-terminated path to a microphone correction file. Empty for none.
+    pub mic_cal_path: [c_char; ANALYZER_PATH_LEN],
+}
+
+/// Copy a string into a fixed NUL-terminated buffer, truncating on a character
+/// boundary so the result stays valid UTF-8.
+fn write_c_string(dest: &mut [c_char], text: &str) {
+    dest.fill(0);
+    let Some(capacity) = dest.len().checked_sub(1) else {
+        return;
+    };
+    let mut end = text.len().min(capacity);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    for (slot, byte) in dest.iter_mut().zip(text.as_bytes().iter().take(end)) {
+        *slot = *byte as c_char;
+    }
+}
+
+/// Read a fixed NUL-terminated buffer back into a string.
+fn read_c_string(source: &[c_char]) -> String {
+    let bytes: Vec<u8> = source
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+impl From<&Settings> for AnalyzerSettings {
+    fn from(value: &Settings) -> Self {
+        let mut out = Self {
+            fft_size: value.fft_size,
+            window: match value.window {
+                WindowChoice::Rectangular => AnalyzerWindow::Rectangular,
+                WindowChoice::Hann => AnalyzerWindow::Hann,
+                WindowChoice::BlackmanHarris => AnalyzerWindow::BlackmanHarris,
+                WindowChoice::FlatTop => AnalyzerWindow::FlatTop,
+            },
+            averaging: match value.averaging {
+                AveragingChoice::None => AnalyzerAveraging::None,
+                AveragingChoice::Fast => AnalyzerAveraging::Fast,
+                AveragingChoice::Infinite => AnalyzerAveraging::Infinite,
+                AveragingChoice::PeakHold => AnalyzerAveraging::PeakHold,
+            },
+            start_on_launch: value.start_on_launch,
+            min_hz: value.min_hz,
+            max_hz: value.max_hz,
+            min_db: value.min_db,
+            max_db: value.max_db,
+            level_grid_step: value.level_grid_step,
+            has_spl_offset: value.spl_offset_db.is_some(),
+            spl_offset_db: value.spl_offset_db.unwrap_or(0.0),
+            mic_cal_path: [0; ANALYZER_PATH_LEN],
+        };
+        write_c_string(
+            &mut out.mic_cal_path,
+            value.mic_cal_path.as_deref().unwrap_or(""),
+        );
+        out
+    }
+}
+
+impl From<&AnalyzerSettings> for Settings {
+    fn from(value: &AnalyzerSettings) -> Self {
+        let path = read_c_string(&value.mic_cal_path);
+        Settings {
+            fft_size: value.fft_size,
+            window: match value.window {
+                AnalyzerWindow::Rectangular => WindowChoice::Rectangular,
+                AnalyzerWindow::BlackmanHarris => WindowChoice::BlackmanHarris,
+                AnalyzerWindow::FlatTop => WindowChoice::FlatTop,
+                // A Tukey window is a shape the DSP has and the preferences
+                // vocabulary does not; it degrades to the default rather than
+                // being stored as something that cannot be read back.
+                AnalyzerWindow::Hann | AnalyzerWindow::Tukey => WindowChoice::Hann,
+            },
+            averaging: match value.averaging {
+                AnalyzerAveraging::None => AveragingChoice::None,
+                AnalyzerAveraging::Fast => AveragingChoice::Fast,
+                AnalyzerAveraging::Infinite => AveragingChoice::Infinite,
+                AnalyzerAveraging::PeakHold => AveragingChoice::PeakHold,
+            },
+            start_on_launch: value.start_on_launch,
+            min_hz: value.min_hz,
+            max_hz: value.max_hz,
+            min_db: value.min_db,
+            max_db: value.max_db,
+            level_grid_step: value.level_grid_step,
+            spl_offset_db: value.has_spl_offset.then_some(value.spl_offset_db),
+            mic_cal_path: (!path.is_empty()).then_some(path),
+        }
+        .validated()
+    }
+}
+
+/// The settings a fresh install starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_settings_default() -> AnalyzerSettings {
+    AnalyzerSettings::from(&Settings::default())
+}
+
+/// Read settings from `path`.
+///
+/// A file that does not exist is not a failure: it is the first launch, and the
+/// defaults are written through with a success status. Anything else - an
+/// unreadable directory, a permissions problem - is reported, because silently
+/// starting from defaults there would look identical to the settings having been
+/// lost.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string. `out` must point to a writable
+/// [`AnalyzerSettings`]. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_settings_load(
+    path: *const c_char,
+    out: *mut AnalyzerSettings,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if path.is_null() || out.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null path or destination")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text,
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                unsafe { ptr::write(out, AnalyzerSettings::from(&Settings::from_text(&text))) };
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                unsafe { ptr::write(out, analyzer_settings_default()) };
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe { ptr::write(out, analyzer_settings_default()) };
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("reading {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
+/// Write settings to `path`, creating the containing directory if needed.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string. `settings` must point to a readable
+/// [`AnalyzerSettings`]. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_settings_save(
+    path: *const c_char,
+    settings: *const AnalyzerSettings,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if path.is_null() || settings.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null path or settings")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+        let settings = Settings::from(unsafe { &*settings });
+
+        if let Some(parent) = std::path::Path::new(&path).parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure(&format!("creating {}: {error}", parent.display())),
+                );
+            }
+            return false;
+        }
+
+        match std::fs::write(&path, settings.to_text()) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -2834,5 +3093,120 @@ mod tests {
         );
         assert_eq!(align_of::<AnalyzerStatus>(), 4);
         assert!(size_of::<AnalyzerFrameInfo>() >= 24);
+    }
+
+    // ----------------------------------------------------------- settings --
+
+    /// A path built from the test name, so parallel tests cannot collide.
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("analyzer-ffi-{name}.cfg"))
+    }
+
+    fn c_path(path: &std::path::Path) -> std::ffi::CString {
+        std::ffi::CString::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_through_the_boundary() {
+        let mut settings = analyzer_settings_default();
+        settings.fft_size = 16384;
+        settings.window = AnalyzerWindow::FlatTop;
+        settings.averaging = AnalyzerAveraging::Infinite;
+        settings.has_spl_offset = true;
+        settings.spl_offset_db = 94.5;
+        write_c_string(&mut settings.mic_cal_path, "/tmp/mic.frd");
+
+        let path = scratch_path("round-trip");
+        let c = c_path(&path);
+        let mut status = AnalyzerStatus::default();
+        assert!(unsafe { analyzer_settings_save(c.as_ptr(), &settings, &mut status) });
+        assert_eq!(status.code, 0);
+
+        let mut loaded = analyzer_settings_default();
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert_eq!(loaded.fft_size, 16384);
+        assert_eq!(loaded.window, AnalyzerWindow::FlatTop);
+        assert_eq!(loaded.averaging, AnalyzerAveraging::Infinite);
+        assert!(loaded.has_spl_offset);
+        assert!((loaded.spl_offset_db - 94.5).abs() < 1e-6);
+        assert_eq!(read_c_string(&loaded.mic_cal_path), "/tmp/mic.frd");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// First launch. A missing file is the normal case, not an error, and
+    /// reporting it as one would train the UI to ignore the status.
+    #[test]
+    fn a_missing_settings_file_loads_defaults_and_succeeds() {
+        let path = scratch_path("absent");
+        let _ = std::fs::remove_file(&path);
+        let c = c_path(&path);
+
+        let mut status = AnalyzerStatus::failure("clobber me");
+        let mut loaded = AnalyzerSettings::from(&Settings {
+            fft_size: 1024,
+            ..Settings::default()
+        });
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert_eq!(status.code, 0);
+        assert_eq!(loaded.fft_size, Settings::default().fft_size);
+    }
+
+    /// The flag exists so that "never calibrated" cannot be confused with a
+    /// calibration that came out at zero.
+    #[test]
+    fn an_unmeasured_spl_offset_stays_unmeasured_across_the_boundary() {
+        let defaults = analyzer_settings_default();
+        assert!(!defaults.has_spl_offset);
+        assert_eq!(Settings::from(&defaults).spl_offset_db, None);
+
+        let mut measured = defaults;
+        measured.has_spl_offset = true;
+        measured.spl_offset_db = 0.0;
+        assert_eq!(Settings::from(&measured).spl_offset_db, Some(0.0));
+    }
+
+    /// A hand-edited file must not be able to hand the axis code a zero span.
+    #[test]
+    fn a_corrupt_settings_file_loads_as_something_usable() {
+        let path = scratch_path("corrupt");
+        std::fs::write(&path, "min_hz: 0\nmax_hz: 0\nfft_size: 7\n").unwrap();
+        let c = c_path(&path);
+
+        let mut status = AnalyzerStatus::default();
+        let mut loaded = analyzer_settings_default();
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert!(loaded.min_hz > 0.0);
+        assert!(loaded.max_hz > loaded.min_hz);
+        assert_eq!(loaded.fft_size, Settings::default().fft_size);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_calls_tolerate_null_pointers() {
+        let mut settings = analyzer_settings_default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe { analyzer_settings_load(ptr::null(), &mut settings, &mut status) });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe { analyzer_settings_save(ptr::null(), &settings, &mut status) });
+        assert_ne!(status.code, 0);
+
+        let c = c_path(&scratch_path("null"));
+        assert!(!unsafe { analyzer_settings_load(c.as_ptr(), ptr::null_mut(), &mut status) });
+        assert!(!unsafe { analyzer_settings_save(c.as_ptr(), ptr::null(), &mut status) });
+        // A null status pointer is legal and must not be written through.
+        assert!(!unsafe { analyzer_settings_save(ptr::null(), ptr::null(), ptr::null_mut()) });
+    }
+
+    /// Truncation must land on a character boundary or the buffer stops being
+    /// valid UTF-8 and the path reads back as replacement characters.
+    #[test]
+    fn an_overlong_path_truncates_without_splitting_a_character() {
+        let mut buffer = [0 as c_char; 8];
+        write_c_string(&mut buffer, "ééééééé");
+        let read = read_c_string(&buffer);
+        assert!(read.chars().all(|c| c == 'é'), "got {read:?}");
+        assert!(read.len() <= 7);
     }
 }

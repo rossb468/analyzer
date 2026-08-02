@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 import AnalyzerFFI
 
@@ -133,14 +134,42 @@ final class AnalyzerModel: ObservableObject {
     /// The upper end is genuinely useful for room work - a room mode is a few
     /// hertz wide and 4096 points cannot resolve one - but it is slow to settle,
     /// so the picker shows the time cost alongside.
+    ///
+    /// Must match `analyzer_model::settings::FFT_SIZES`, which is what validates
+    /// a hand-edited preferences file.
     static let fftSizes: [UInt32] = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131_072]
 
-    let minHz: Float = 20
-    let maxHz: Float = 20_000
-    let minDb: Float = -120
-    let maxDb: Float = 0
+    /// Program settings. The plot's axis range lives here rather than on the
+    /// model, because it survives the session that drew through it.
+    let settings: SettingsStore
+
+    var minHz: Float { settings.minHz }
+    var maxHz: Float { settings.maxHz }
+    var minDb: Float { settings.minDb }
+    var maxDb: Float { settings.maxDb }
+    var levelGridStep: Float { settings.levelGridStep }
+    /// Bumped by the settings store whenever an axis value changes.
+    var axisGeneration: Int { settings.axisGeneration }
+
+    private var settingsSubscription: AnyCancellable?
 
     private(set) var session: AnalyzerSessionHandle?
+
+    /// Starts from the stored defaults rather than from constants, so the
+    /// Settings window's "new sessions start with" actually decides that.
+    init(settings: SettingsStore) {
+        self.settings = settings
+        fftSize = settings.fftSize
+        window = settings.window
+        averaging = settings.averaging
+
+        // Views bind to the model, not to the store, so a change to the axis
+        // range has to be republished or nothing redraws until the next frame
+        // happens to touch the model.
+        settingsSubscription = settings.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
 
     /// Whether the selected device can play a stimulus.
     ///

@@ -8,7 +8,11 @@ import AnalyzerFFI
 /// room as the curve above it. Only the sections that have a wide editor get
 /// one; the rest give the whole column to the plot.
 struct ContentView: View {
-    @StateObject private var model = AnalyzerModel()
+    @StateObject private var model: AnalyzerModel
+
+    init(settings: SettingsStore) {
+        _model = StateObject(wrappedValue: AnalyzerModel(settings: settings))
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -38,7 +42,9 @@ struct ContentView: View {
         .frame(minHeight: 460)
         .onAppear {
             model.refreshDevices()
-            model.start()
+            if model.settings.startOnLaunch {
+                model.start()
+            }
         }
         .onDisappear { model.stop() }
     }

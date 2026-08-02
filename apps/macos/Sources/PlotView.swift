@@ -38,6 +38,7 @@ struct SpectrumView: NSViewRepresentable {
         var model: AnalyzerModel
         var renderer: SpectrumRenderer?
         private var lastColumns = 0
+        private var lastAxisGeneration = -1
         private var drawableSize = CGSize.zero
         private var distortionCountdown = 0
 
@@ -142,10 +143,14 @@ struct SpectrumView: NSViewRepresentable {
         /// exactly instead of being a pixel apart from each other.
         ///
         /// The resize callback normally gets here first; this covers the first
-        /// frame of a session started against an already-sized view.
+        /// frame of a session started against an already-sized view, and a
+        /// change to the axis range made in the Settings window while the view
+        /// is the same size it already was.
         private func syncGeometry(columns: Int) {
-            guard columns != lastColumns else { return }
+            let generation = model.axisGeneration
+            guard columns != lastColumns || generation != lastAxisGeneration else { return }
             lastColumns = columns
+            lastAxisGeneration = generation
             let height = drawableSize.height > 0 ? Float(drawableSize.height) : Float(columns) / 2
             declareGeometry(width: Float(columns), height: height)
         }
@@ -189,7 +194,7 @@ struct SpectrumView: NSViewRepresentable {
                 points.append(SIMD2(x, -1))
                 points.append(SIMD2(x, 1))
             }
-            for tick in session.levelTicks(step: 20) {
+            for tick in session.levelTicks(step: model.levelGridStep) {
                 let t = (tick.value - model.minDb) / (model.maxDb - model.minDb)
                 let y = t * 2 - 1
                 points.append(SIMD2(-1, y))
@@ -250,7 +255,7 @@ struct PlotView: View {
 
     private func levelLabels() -> [(text: String, y: CGFloat)] {
         guard let session = model.session, model.plotScale > 0 else { return [] }
-        return session.levelTicks(step: 20).map { tick in
+        return session.levelTicks(step: model.levelGridStep).map { tick in
             (String(Int(tick.value)), CGFloat(session.y(forLevel: tick.value)) / model.plotScale)
         }
     }

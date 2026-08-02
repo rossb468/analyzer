@@ -15,8 +15,10 @@
 pub mod export;
 pub mod format;
 pub mod measurement;
+pub mod settings;
 pub mod store;
 
 pub use format::{FormatError, MAGIC, read, write};
 pub use measurement::{Complex64, Measurement, MeasurementData, MeasurementId, References};
+pub use settings::{AveragingChoice, SETTINGS_MAGIC, Settings, WindowChoice};
 pub use store::MeasurementStore;
