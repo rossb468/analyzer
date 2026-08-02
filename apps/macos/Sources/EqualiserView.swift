@@ -67,6 +67,8 @@ struct EqualiserInspector: View {
             }
         }
 
+        TargetSettings(model: model)
+
         Section("Display") {
             Toggle("Corrected curve", isOn: $model.showCorrected)
                 .help("Draw the measurement with the equaliser applied, beside the raw one.")

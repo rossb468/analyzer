@@ -25,6 +25,7 @@ pub mod meter;
 pub mod mtw;
 pub mod octave;
 pub mod spectrum;
+pub mod target;
 pub mod transfer;
 pub mod window;
 
@@ -40,6 +41,7 @@ pub use meter::{Integration, LevelMeter, MeterWeighting};
 pub use mtw::{MtwConfig, MtwPoint, MultiTimeWindow};
 pub use octave::{Band, OctaveBands};
 pub use spectrum::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig};
+pub use target::{TargetCurve, TargetShape};
 pub use transfer::{TransferAveraging, TransferConfig, TransferFunction, unwrap_phase_degrees};
 pub use window::{Window, WindowKind};
 

@@ -482,6 +482,52 @@ final class AnalyzerSessionHandle {
         return correctedStorage[0..<written]
     }
 
+    private var targetStorage: [Float] = []
+
+    /// The session's target curve.
+    var target: AnalyzerTarget? {
+        guard let handle else { return nil }
+        var raw = analyzer_target_default()
+        guard analyzer_session_target(handle, &raw) else { return nil }
+        return raw
+    }
+
+    func setTarget(_ target: AnalyzerTarget) {
+        guard let handle else { return }
+        var raw = target
+        _ = analyzer_session_set_target(handle, &raw)
+    }
+
+    /// Load a custom target from a frequency/level text file.
+    func loadTarget(from url: URL) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var status = AnalyzerStatus()
+        let ok = url.path.withCString { path in
+            analyzer_session_load_target(handle, path, &status)
+        }
+        guard ok else { throw AnalyzerError.failed(Self.message(from: status)) }
+    }
+
+    /// Align the target to the current measurement.
+    @discardableResult
+    func alignTarget() -> Bool {
+        guard let handle else { return false }
+        return analyzer_session_align_target(handle)
+    }
+
+    /// Copy the target curve, one level per pixel column.
+    func copyTarget(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if targetStorage.count < columns {
+            targetStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = targetStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_target(handle, base, UInt(columns)))
+        }
+        return targetStorage[0..<written]
+    }
+
     /// Write the active equaliser out in `format`.
     ///
     /// - Throws: [`AnalyzerError`] with whatever the core reported, which is

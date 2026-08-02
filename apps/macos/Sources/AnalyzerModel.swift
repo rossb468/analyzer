@@ -264,9 +264,11 @@ final class AnalyzerModel: ObservableObject {
             deviceName = handle.deviceName
             isRunning = true
             errorMessage = nil
-            // The core starts every session with the equaliser off, so the
-            // mode has to be re-applied rather than assumed to survive.
+            // The core starts every session with the equaliser off and a flat
+            // target, so both have to be re-applied rather than assumed to
+            // survive the restart that a settings change causes.
             applyEqMode()
+            applyTarget()
         } catch {
             // The most common failure by far is microphone permission, and the
             // Rust side already explains that case in detail rather than just
@@ -353,6 +355,58 @@ final class AnalyzerModel: ObservableObject {
     func trimEq() {
         session?.trimEq()
         refreshEq()
+    }
+
+    // -------------------------------------------------------------- target -
+
+    /// The response a correction is aiming at. Mirrored from the core, which
+    /// owns it, for the same reason the equaliser bands are.
+    @Published var target = analyzer_target_default()
+    /// Whether the target curve is drawn.
+    @Published var showTarget = false
+
+    func refreshTarget() {
+        target = session?.target ?? analyzer_target_default()
+    }
+
+    /// Push the mirrored target back to the core and re-read what it made of it.
+    func applyTarget() {
+        session?.setTarget(target)
+        refreshTarget()
+    }
+
+    /// Align the target to the current measurement.
+    ///
+    /// A target says nothing about absolute level, so until this runs it sits
+    /// wherever the offset happens to be rather than on the curve.
+    func alignTarget() {
+        guard session?.alignTarget() == true else {
+            errorMessage = "Nothing has been captured yet to align against."
+            return
+        }
+        refreshTarget()
+        showTarget = true
+    }
+
+    func loadTarget() {
+        guard let session else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a target curve"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = ["frd", "cal"].compactMap {
+            UTType(filenameExtension: $0)
+        } + [.plainText]
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try session.loadTarget(from: url)
+            refreshTarget()
+            showTarget = true
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     /// Ask for a location and write the equaliser there.

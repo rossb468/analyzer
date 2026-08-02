@@ -84,6 +84,13 @@ struct SpectrumView: NSViewRepresentable {
                     guard self.model.showAverage else { return [][...] }
                     return session.copyAverage(columns: columns)
                 },
+                // What the correction is aiming at. Drawn under the equaliser
+                // and the measurement, because it is the thing being aimed at
+                // rather than the thing being read.
+                layer(colour: SIMD4(0.85, 0.80, 0.35, 0.75), range: levelRange) { session, columns in
+                    guard self.model.showTarget else { return [][...] }
+                    return session.copyTarget(columns: columns)
+                },
                 // The equaliser's own curve, on the same decibel axis as
                 // everything else so a 6 dB cut looks like 6 dB.
                 layer(colour: SIMD4(0.95, 0.35, 0.55, 0.85), range: levelRange) { session, columns in

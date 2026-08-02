@@ -34,9 +34,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
+use analyzer_dsp::target::{ALIGN_FROM_HZ, ALIGN_TO_HZ};
 use analyzer_dsp::{
     Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator, Overlap,
-    Signal, SpectrumConfig, WindowKind,
+    Signal, SpectrumConfig, TargetCurve, TargetShape, WindowKind,
 };
 use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
@@ -819,6 +820,9 @@ pub struct AnalyzerSession {
     /// Rebuilt only when the geometry changes.
     column_hz: Vec<f32>,
     eq_trace: Trace,
+    /// The response a correction is aiming at, and its alignment offset.
+    target: TargetCurve,
+    target_trace: Trace,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -1145,6 +1149,8 @@ fn start_session(
         eq_generation: 0,
         column_hz: Vec::new(),
         eq_trace: Trace::default(),
+        target: TargetCurve::default(),
+        target_trace: Trace::default(),
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -1482,6 +1488,103 @@ pub unsafe extern "C" fn analyzer_session_set_signal(
 }
 
 impl AnalyzerSession {
+    /// Describe the target for the UI.
+    fn target_description(&self) -> AnalyzerTarget {
+        let mut out = AnalyzerTarget {
+            offset_db: self.target.offset_db(),
+            has_custom: self.has_custom_target(),
+            ..AnalyzerTarget::default()
+        };
+        match self.target.shape() {
+            TargetShape::Flat => out.shape = AnalyzerTargetShape::Flat,
+            TargetShape::Tilt { db_per_octave } => {
+                out.shape = AnalyzerTargetShape::Tilt;
+                out.db_per_octave = *db_per_octave;
+            }
+            TargetShape::Room {
+                shelf_db,
+                transition_hz,
+                db_per_octave,
+            } => {
+                out.shape = AnalyzerTargetShape::Room;
+                out.shelf_db = *shelf_db;
+                out.transition_hz = *transition_hz;
+                out.db_per_octave = *db_per_octave;
+            }
+            TargetShape::Custom { .. } => out.shape = AnalyzerTargetShape::Custom,
+        }
+        out
+    }
+
+    /// Whether a custom curve has been loaded and has points in it.
+    fn has_custom_target(&self) -> bool {
+        self.custom_points()
+            .is_some_and(|points| !points.is_empty())
+    }
+
+    /// The loaded custom points, kept so switching shapes and back does not
+    /// discard a file the user chose.
+    fn custom_points(&self) -> Option<&[(f32, f32)]> {
+        match self.target.shape() {
+            TargetShape::Custom { points } => Some(points),
+            _ => None,
+        }
+    }
+
+    /// Apply a shape chosen in the UI.
+    fn apply_target(&mut self, wanted: AnalyzerTarget) {
+        let shape = match wanted.shape {
+            AnalyzerTargetShape::Flat => TargetShape::Flat,
+            AnalyzerTargetShape::Tilt => TargetShape::Tilt {
+                db_per_octave: wanted.db_per_octave,
+            },
+            AnalyzerTargetShape::Room => TargetShape::Room {
+                shelf_db: wanted.shelf_db,
+                transition_hz: wanted.transition_hz,
+                db_per_octave: wanted.db_per_octave,
+            },
+            // Selecting Custom without a loaded file would evaluate to nothing.
+            // Keeping the points already there, or falling back to flat, is
+            // more honest than drawing a curve that is silently absent.
+            AnalyzerTargetShape::Custom => match self.custom_points() {
+                Some(points) => TargetShape::Custom {
+                    points: points.to_vec(),
+                },
+                None => TargetShape::Flat,
+            },
+        };
+        self.target.set_shape(shape);
+        self.target.set_offset_db(wanted.offset_db);
+    }
+
+    /// Align the target to the latest analysed frame.
+    fn align_target(&mut self) -> bool {
+        let columns = self.columns;
+        self.columns_hz(columns);
+
+        let levels: Vec<f32> = {
+            let frame = self.engine.latest();
+            if frame.bins.is_empty() {
+                return false;
+            }
+            // Evaluate the measurement at the same frequencies the target is
+            // drawn at, so the alignment matches what is on screen.
+            self.column_hz
+                .iter()
+                .take(columns)
+                .map(|hz| {
+                    let bin = (hz / frame.bin_spacing_hz).round() as usize;
+                    frame.bins.get(bin).copied().unwrap_or(f32::NAN)
+                })
+                .collect()
+        };
+
+        let frequencies: Vec<f32> = self.column_hz.iter().take(columns).copied().collect();
+        self.target
+            .align_to(&frequencies, &levels, ALIGN_FROM_HZ, ALIGN_TO_HZ);
+        true
+    }
+
     /// The equaliser the current mode selects.
     fn equaliser(&self) -> Option<&Equaliser> {
         match self.eq_mode {
@@ -2493,6 +2596,229 @@ pub unsafe extern "C" fn analyzer_level_ticks(
 }
 
 // ---------------------------------------------------------------------------
+// Target curves
+// ---------------------------------------------------------------------------
+
+/// Which target shape is selected.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzerTargetShape {
+    /// Flat at every frequency.
+    Flat = 0,
+    /// A constant slope in decibels per octave.
+    Tilt = 1,
+    /// A bass shelf with an optional tilt above it.
+    Room = 2,
+    /// Points loaded from a file.
+    Custom = 3,
+}
+
+/// A target curve, as a flat POD struct.
+///
+/// The shape parameters are all carried regardless of which shape is selected,
+/// so switching between them and back does not lose what was set.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerTarget {
+    /// Which shape is evaluated.
+    pub shape: AnalyzerTargetShape,
+    /// Lift at the bottom of the band, for [`AnalyzerTargetShape::Room`].
+    pub shelf_db: f32,
+    /// Where the shelf reaches half its lift, in hertz.
+    pub transition_hz: f32,
+    /// Slope in decibels per octave, zero at 1 kHz.
+    pub db_per_octave: f32,
+    /// Alignment offset currently applied.
+    pub offset_db: f32,
+    /// Whether a custom curve has been loaded and has points.
+    pub has_custom: bool,
+}
+
+impl Default for AnalyzerTarget {
+    fn default() -> Self {
+        let TargetShape::Room {
+            shelf_db,
+            transition_hz,
+            db_per_octave,
+        } = TargetShape::room()
+        else {
+            unreachable!("TargetShape::room is a Room")
+        };
+        Self {
+            shape: AnalyzerTargetShape::Flat,
+            shelf_db,
+            transition_hz,
+            db_per_octave,
+            offset_db: 0.0,
+            has_custom: false,
+        }
+    }
+}
+
+/// The target a fresh session starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_target_default() -> AnalyzerTarget {
+    AnalyzerTarget::default()
+}
+
+/// Read the session's target.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_target(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerTarget,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { ptr::write(out, (*session).target_description()) };
+        true
+    })
+}
+
+/// Replace the session's target shape.
+///
+/// Selecting [`AnalyzerTargetShape::Custom`] without a loaded curve leaves the
+/// shape flat rather than silently evaluating to nothing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `target` must be readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_set_target(
+    session: *mut AnalyzerSession,
+    target: *const AnalyzerTarget,
+) -> bool {
+    if session.is_null() || target.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let wanted = unsafe { *target };
+        session.apply_target(wanted);
+        true
+    })
+}
+
+/// Load a custom target from a frequency/level text file and select it.
+///
+/// # Safety
+///
+/// `session` must be null or live. `path` must be a NUL-terminated C string.
+/// `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_load_target(
+    session: *mut AnalyzerSession,
+    path: *const c_char,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("reading {path}: {error}")),
+                    );
+                }
+                return false;
+            }
+        };
+
+        // The calibration parser already handles the frequency/level text these
+        // files ship as, including the comment and header conventions.
+        let curve = analyzer_cal::ResponseCurve::parse(&text);
+        if curve.points().is_empty() {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("no frequency and level pairs found in that file"),
+                );
+            }
+            return false;
+        }
+
+        let session = unsafe { &mut *session };
+        session
+            .target
+            .set_shape(TargetShape::custom(curve.points().to_vec()));
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// Align the target to the current measurement over the default band.
+///
+/// A target is relative, so without this it floats somewhere unrelated to the
+/// measurement and every error computed against it is dominated by a constant.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_align_target(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        session.align_target()
+    })
+}
+
+/// Copy the target curve, one level per pixel column.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_target(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        let columns = session.columns.min(capacity);
+        session.columns_hz(columns);
+
+        session.target_trace.points.clear();
+        session.target_trace.points.reserve(columns);
+        // Split the borrow: the target reads while the trace is written.
+        let target = &session.target;
+        for hz in session.column_hz.iter().take(columns) {
+            session.target_trace.points.push(target.db_at(*hz));
+        }
+
+        let written = session.target_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.target_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Filter export
 // ---------------------------------------------------------------------------
 
@@ -3180,6 +3506,44 @@ mod tests {
         );
         assert_eq!(align_of::<AnalyzerStatus>(), 4);
         assert!(size_of::<AnalyzerFrameInfo>() >= 24);
+    }
+
+    // ------------------------------------------------------------ target --
+
+    #[test]
+    fn target_calls_tolerate_null_handles() {
+        let mut target = analyzer_target_default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe { analyzer_session_target(ptr::null(), &mut target) });
+        assert!(!unsafe { analyzer_session_set_target(ptr::null_mut(), &target) });
+        assert!(!unsafe { analyzer_session_align_target(ptr::null_mut()) });
+        assert_eq!(
+            unsafe { analyzer_session_copy_target(ptr::null_mut(), ptr::null_mut(), 0) },
+            0
+        );
+        assert!(!unsafe {
+            analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
+        });
+        assert_ne!(status.code, 0);
+    }
+
+    #[test]
+    fn target_shape_codes_are_stable() {
+        assert_eq!(AnalyzerTargetShape::Flat as u32, 0);
+        assert_eq!(AnalyzerTargetShape::Tilt as u32, 1);
+        assert_eq!(AnalyzerTargetShape::Room as u32, 2);
+        assert_eq!(AnalyzerTargetShape::Custom as u32, 3);
+    }
+
+    /// The room parameters travel with every target, so switching to flat and
+    /// back does not reset what was dialled in.
+    #[test]
+    fn the_default_target_carries_usable_room_parameters() {
+        let target = analyzer_target_default();
+        assert_eq!(target.shape, AnalyzerTargetShape::Flat);
+        assert!(target.shelf_db > 0.0);
+        assert!(target.transition_hz > 0.0);
+        assert!(!target.has_custom);
     }
 
     /// Exporting with no equaliser running must say so rather than leave an
