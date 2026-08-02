@@ -113,6 +113,28 @@ struct SpectrumView: NSViewRepresentable {
                     guard self.model.showAverage else { return [][...] }
                     return session.copyAverage(columns: columns)
                 },
+                // The swept measurement's gated response. Its own layer
+                // rather than the live trace, because it is a completed
+                // measurement rather than something still settling.
+                layer(colour: SIMD4(0.45, 0.95, 0.85, 0.95), range: levelRange) { session, columns in
+                    guard self.model.section == .measure,
+                          self.model.showMeasured,
+                          !self.model.showImpulse
+                    else { return [][...] }
+                    return session.copyMeasured(columns: columns)
+                },
+                // The impulse response, on its own normalised axis. Amplitudes
+                // rather than decibels, so the polarity of the arrival is
+                // visible - which is the thing an impulse view is for.
+                layer(colour: SIMD4(0.95, 0.85, 0.45, 0.95), range: (-1, 1)) { session, columns in
+                    guard self.model.section == .measure, self.model.showImpulse else {
+                        return [][...]
+                    }
+                    return session.copyImpulse(
+                        columns: columns,
+                        seconds: self.model.impulseWindowSeconds
+                    )
+                },
                 // What the correction is aiming at. Drawn under the equaliser
                 // and the measurement, because it is the thing being aimed at
                 // rather than the thing being read.

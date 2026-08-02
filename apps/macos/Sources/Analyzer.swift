@@ -551,6 +551,77 @@ final class AnalyzerSessionHandle {
         return targetStorage[0..<written]
     }
 
+    private var measuredStorage: [Float] = []
+    private var impulseStorage: [Float] = []
+
+    // ---------------------------------------------------------- measurement -
+
+    /// Play a sweep and start recording the response.
+    func startMeasurement(_ config: AnalyzerMeasureConfig) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var settings = config
+        var status = AnalyzerStatus()
+        guard analyzer_session_start_measurement(handle, &settings, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+    }
+
+    var measureProgress: AnalyzerMeasureProgress? {
+        guard let handle else { return nil }
+        var raw = AnalyzerMeasureProgress()
+        guard analyzer_session_measure_progress(handle, &raw) else { return nil }
+        return raw
+    }
+
+    func cancelMeasurement() {
+        guard let handle else { return }
+        analyzer_session_cancel_measurement(handle)
+    }
+
+    /// Deconvolve the recording. Throws while the sweep is still playing.
+    func finishMeasurement() throws -> AnalyzerMeasureResult {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var result = AnalyzerMeasureResult()
+        var status = AnalyzerStatus()
+        guard analyzer_session_finish_measurement(handle, &result, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+        return result
+    }
+
+    var measurementResult: AnalyzerMeasureResult? {
+        guard let handle else { return nil }
+        var raw = AnalyzerMeasureResult()
+        guard analyzer_session_measurement_result(handle, &raw) else { return nil }
+        return raw
+    }
+
+    /// Copy the measured response, reduced onto the current axis.
+    func copyMeasured(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if measuredStorage.count < columns {
+            measuredStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = measuredStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_measured(handle, base, UInt(columns)))
+        }
+        return measuredStorage[0..<written]
+    }
+
+    /// Copy the impulse response, decimated and normalised to its peak.
+    func copyImpulse(columns: Int, seconds: Float) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if impulseStorage.count < columns {
+            impulseStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = impulseStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_impulse(handle, base, UInt(columns), seconds))
+        }
+        return impulseStorage[0..<written]
+    }
+
     private var spectrogramStorage: [Float] = []
 
     /// Copy the newest frame reduced onto `rows` frequency positions.

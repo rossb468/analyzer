@@ -14,6 +14,7 @@ import AnalyzerFFI
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case rta
     case transfer
+    case measure
     case spectrogram
     case equaliser
     case traces
@@ -21,7 +22,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     var id: String { rawValue }
 
     /// Sections that decide what the plot draws, listed above the editors.
-    static let analysis: [AppSection] = [.rta, .transfer, .spectrogram]
+    static let analysis: [AppSection] = [.rta, .transfer, .measure, .spectrogram]
     /// Sections that edit something drawn over whatever analysis is running.
     static let editors: [AppSection] = [.equaliser, .traces]
 
@@ -29,6 +30,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .rta: "RTA"
         case .transfer: "Transfer"
+        case .measure: "Measure"
         case .spectrogram: "Spectrogram"
         case .equaliser: "Equaliser"
         case .traces: "Traces"
@@ -39,6 +41,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .rta: "waveform"
         case .transfer: "arrow.left.arrow.right"
+        case .measure: "dot.radiowaves.left.and.right"
         case .spectrogram: "square.grid.3x3.fill"
         case .equaliser: "slider.vertical.3"
         case .traces: "square.stack.3d.up"
@@ -51,7 +54,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// The analysis mode this section needs, for the ones that drive the plot.
     var analysisMode: AnalyzerMode? {
         switch self {
-        case .rta, .spectrogram: AnalyzerMode_Spectrum
+        case .rta, .spectrogram, .measure: AnalyzerMode_Spectrum
         case .transfer: AnalyzerMode_Transfer
         case .equaliser, .traces: nil
         }
@@ -362,6 +365,96 @@ final class AnalyzerModel: ObservableObject {
     func trimEq() {
         session?.trimEq()
         refreshEq()
+    }
+
+    // --------------------------------------------------------- measurement -
+
+    /// How the sweep is taken. Mirrored from the core.
+    @Published var measureConfig = analyzer_measure_config_default()
+    /// The last completed measurement, or nil until one has run.
+    @Published var measurement: AnalyzerMeasureResult?
+    /// Whether a sweep is playing.
+    @Published var isMeasuring = false
+    /// Fraction of the recording captured, for the progress bar.
+    @Published var measureProgress: Double = 0
+    /// Whether the measured response is drawn.
+    @Published var showMeasured = true
+    /// Whether the impulse response is drawn instead of the frequency response.
+    @Published var showImpulse = false
+
+    /// How much of the impulse response the impulse view shows.
+    ///
+    /// Long enough to hold the direct arrival and the early reflections, which
+    /// is what the view is for; the decay itself is what the reverberation
+    /// figures describe.
+    @Published var impulseWindowSeconds: Float = 0.05
+
+    private var measureTimer: Timer?
+
+    func startMeasurement() {
+        guard let session else { return }
+        do {
+            try session.startMeasurement(measureConfig)
+            isMeasuring = true
+            measureProgress = 0
+            errorMessage = nil
+            pollMeasurement()
+        } catch {
+            isMeasuring = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func cancelMeasurement() {
+        measureTimer?.invalidate()
+        measureTimer = nil
+        session?.cancelMeasurement()
+        isMeasuring = false
+        measureProgress = 0
+    }
+
+    /// Watch the recording fill, then deconvolve.
+    ///
+    /// A timer rather than a callback because the capture is filled by the
+    /// analysis thread, and the alternative - blocking the main thread for the
+    /// length of a sweep - would freeze the window while it played.
+    private func pollMeasurement() {
+        measureTimer?.invalidate()
+        measureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, let session = self.session else {
+                    timer.invalidate()
+                    return
+                }
+                guard let progress = session.measureProgress, progress.active else {
+                    timer.invalidate()
+                    self.isMeasuring = false
+                    return
+                }
+
+                self.measureProgress = progress.total > 0
+                    ? Double(progress.captured) / Double(progress.total)
+                    : 0
+
+                guard progress.complete else { return }
+                timer.invalidate()
+                self.measureTimer = nil
+                self.isMeasuring = false
+                self.finishMeasurement()
+            }
+        }
+    }
+
+    private func finishMeasurement() {
+        guard let session else { return }
+        do {
+            measurement = try session.finishMeasurement()
+            showMeasured = true
+            errorMessage = nil
+        } catch {
+            measurement = nil
+            errorMessage = error.localizedDescription
+        }
     }
 
     // --------------------------------------------------------- spectrogram -

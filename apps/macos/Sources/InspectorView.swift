@@ -16,6 +16,7 @@ struct InspectorView: View {
             case .rta: rta
             case .transfer: transfer
             case .equaliser: EqualiserInspector(model: model)
+            case .measure: MeasureInspector(model: model)
             case .spectrogram: spectrogram
             case .traces: TracesInspector(model: model)
             }

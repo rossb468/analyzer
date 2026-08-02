@@ -17,8 +17,8 @@
 //! buffers resized underneath a running audio callback, and the resulting
 //! synchronisation is not worth it for something a user does by clicking a menu.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -164,6 +164,27 @@ impl EngineConfig {
     }
 }
 
+/// A raw capture in progress.
+///
+/// Swept measurement needs the recorded samples themselves, not a spectrum, so
+/// the analysis thread copies the channel under analysis into here while a
+/// measurement is armed.
+///
+/// A mutex is fine and a ring is not needed: this is shared between the
+/// *analysis* thread and the caller, never the audio callback. The callback
+/// still only writes into the lock-free ring and returns. The lock is held for
+/// one `extend_from_slice` of at most `DRAIN_FRAMES` samples, and only while a
+/// measurement is running.
+#[derive(Debug, Default)]
+struct Recording {
+    samples: Vec<f32>,
+    /// Frames still wanted. Zero with `active` set means the capture is done.
+    wanted: usize,
+    /// Frames asked for, kept so progress can be reported as a fraction.
+    total: usize,
+    active: bool,
+}
+
 /// Owns the analysis thread and exposes the newest result.
 ///
 /// Dropping stops the worker and joins it.
@@ -176,6 +197,7 @@ pub struct Engine {
     reset_average: Arc<AtomicBool>,
     applied_delay: Arc<AtomicU32>,
     estimate_delay: Arc<AtomicBool>,
+    recording: Arc<Mutex<Recording>>,
     config: EngineConfig,
 }
 
@@ -262,6 +284,7 @@ impl Engine {
         let reset_average = Arc::new(AtomicBool::new(false));
         let applied_delay = Arc::new(AtomicU32::new(0));
         let estimate_delay = Arc::new(AtomicBool::new(false));
+        let recording = Arc::new(Mutex::new(Recording::default()));
         // A second of delay covers 343 m of air, which is more room than anyone
         // measures, and costs 192 kB at 48 kHz.
         let max_delay = config.spectrum.sample_rate.max(1.0) as usize;
@@ -279,6 +302,7 @@ impl Engine {
             let reset_average = Arc::clone(&reset_average);
             let applied_delay = Arc::clone(&applied_delay);
             let estimate_delay = Arc::clone(&estimate_delay);
+            let recording = Arc::clone(&recording);
             let channel = config.analysis_channel;
             let channels = config.channels;
             let mode = config.mode;
@@ -304,6 +328,7 @@ impl Engine {
                         delay_line: DelayLine::new(max_delay + 1),
                         applied_delay,
                         estimate_delay,
+                        recording,
                         finder,
                         finder_reference: vec![0.0; finder_size],
                         finder_measurement: vec![0.0; finder_size],
@@ -324,9 +349,59 @@ impl Engine {
                 reset_average,
                 applied_delay,
                 estimate_delay,
+                recording,
                 config,
             },
         )
+    }
+
+    /// Arm a raw capture of `frames` samples from the analysed channel.
+    ///
+    /// The buffer is allocated here, on the caller's thread, so the analysis
+    /// thread only ever appends into space that already exists. Any capture
+    /// already in progress is discarded.
+    pub fn begin_recording(&self, frames: usize) {
+        let Ok(mut recording) = self.recording.lock() else {
+            return;
+        };
+        recording.samples = Vec::with_capacity(frames);
+        recording.wanted = frames;
+        recording.total = frames;
+        recording.active = true;
+    }
+
+    /// Samples captured so far, and how many were asked for.
+    ///
+    /// Returns `(0, 0)` when nothing is armed.
+    pub fn recording_progress(&self) -> (usize, usize) {
+        match self.recording.lock() {
+            Ok(recording) if recording.active => (recording.samples.len(), recording.total),
+            _ => (0, 0),
+        }
+    }
+
+    /// Take the recording once it is complete.
+    ///
+    /// Returns `None` while it is still filling, so a caller polling this
+    /// cannot accidentally deconvolve half a sweep and report the result as a
+    /// measurement.
+    pub fn take_recording(&self) -> Option<Vec<f32>> {
+        let mut recording = self.recording.lock().ok()?;
+        if !recording.active || recording.wanted > 0 {
+            return None;
+        }
+        recording.active = false;
+        recording.wanted = 0;
+        recording.total = 0;
+        Some(std::mem::take(&mut recording.samples))
+    }
+
+    /// Abandon a capture in progress and release its buffer.
+    pub fn cancel_recording(&self) {
+        let Ok(mut recording) = self.recording.lock() else {
+            return;
+        };
+        *recording = Recording::default();
     }
 
     /// The newest published frame. Never blocks.
@@ -424,6 +499,7 @@ struct Worker {
     delay_line: DelayLine,
     applied_delay: Arc<AtomicU32>,
     estimate_delay: Arc<AtomicBool>,
+    recording: Arc<Mutex<Recording>>,
     finder: Option<DelayFinder>,
     /// Accumulators for the delay finder, which needs a longer view than one
     /// drain pass provides.
@@ -510,6 +586,23 @@ impl Worker {
 }
 
 impl Worker {
+    /// Copy the analysed channel into an armed recording.
+    ///
+    /// Runs on the analysis thread, never the audio callback, so taking the
+    /// lock here is allowed. It is uncontended except when the caller polls
+    /// progress.
+    fn capture(&mut self, frames: usize) {
+        let Ok(mut recording) = self.recording.lock() else {
+            return;
+        };
+        if !recording.active || recording.wanted == 0 {
+            return;
+        }
+        let take = frames.min(recording.wanted);
+        recording.samples.extend_from_slice(&self.mono[..take]);
+        recording.wanted -= take;
+    }
+
     fn run(&mut self) {
         let mut sequence = 0_u64;
 
@@ -548,6 +641,8 @@ impl Worker {
                     .copied()
                     .unwrap_or_default();
             }
+
+            self.capture(frames);
 
             if let AnalysisMode::Transfer {
                 reference_channel, ..
@@ -1132,5 +1227,69 @@ mod tests {
     #[should_panic(expected = "analysis channel 2 does not exist")]
     fn rejects_an_analysis_channel_that_does_not_exist() {
         let _ = Engine::start(config(2, 2));
+    }
+
+    // ----------------------------------------------------------- recording -
+
+    /// Swept measurement needs the samples themselves. The capture has to fill
+    /// with what was actually played, and stop at exactly the length asked for.
+    #[test]
+    fn a_recording_captures_the_requested_length_and_no_more() {
+        let (mut sink, mut engine) = Engine::start(config(1, 0));
+        engine.begin_recording(1000);
+
+        // A ramp, so a short or misaligned capture is visible rather than
+        // plausible: sample n has value n.
+        let block: Vec<f32> = (0..4096).map(|n| n as f32).collect();
+        // The ring is smaller than the block, so feed it in chunks and let the
+        // analysis thread drain between them.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let mut written = 0;
+        while written < block.len() && Instant::now() < deadline {
+            let end = (written + 512).min(block.len());
+            if sink.write_interleaved(&block[written..end]) {
+                written = end;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let mut captured = None;
+        while Instant::now() < deadline {
+            if let Some(samples) = engine.take_recording() {
+                captured = Some(samples);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let captured = captured.expect("recording never completed");
+        assert_eq!(captured.len(), 1000, "captured the wrong length");
+        assert_eq!(captured[0], 0.0);
+        assert_eq!(captured[999], 999.0, "samples arrived out of order");
+
+        engine.stop();
+    }
+
+    /// Polling must not hand back half a sweep, which would deconvolve into a
+    /// measurement that looks real and is not.
+    #[test]
+    fn an_incomplete_recording_is_not_handed_over() {
+        let (_sink, mut engine) = Engine::start(config(1, 0));
+        engine.begin_recording(48_000);
+        assert!(engine.take_recording().is_none());
+        let (captured, total) = engine.recording_progress();
+        assert_eq!(captured, 0);
+        assert_eq!(total, 48_000);
+        engine.stop();
+    }
+
+    #[test]
+    fn cancelling_releases_the_capture() {
+        let (_sink, mut engine) = Engine::start(config(1, 0));
+        engine.begin_recording(48_000);
+        engine.cancel_recording();
+        assert_eq!(engine.recording_progress(), (0, 0));
+        assert!(engine.take_recording().is_none());
+        engine.stop();
     }
 }

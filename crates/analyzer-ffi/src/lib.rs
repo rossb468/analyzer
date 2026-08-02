@@ -34,10 +34,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
+use analyzer_dsp::deconv::DEFAULT_REGULARISATION;
 use analyzer_dsp::target::{ALIGN_FROM_HZ, ALIGN_TO_HZ};
 use analyzer_dsp::{
-    Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator,
-    OptimiserConfig, Overlap, Signal, SpectrumConfig, TargetCurve, TargetShape, WindowKind,
+    Averaging, Biquad, Deconvolver, DistortionConfig, Equaliser, FilterBand, FilterKind, Gate,
+    Generator, ImpulseResponse, OptimiserConfig, Overlap, Signal, SpectrumConfig, TargetCurve,
+    TargetShape, WindowKind, gated_response, reverb_time, schroeder_decay,
 };
 use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
@@ -615,6 +617,10 @@ struct SignalState {
     kind: AtomicU32,
     amplitude_bits: AtomicU32,
     hz_bits: AtomicU32,
+    /// Upper end of a sweep. Unused by every other signal.
+    end_hz_bits: AtomicU32,
+    /// Sweep duration in seconds. Unused by every other signal.
+    seconds_bits: AtomicU32,
 }
 
 impl SignalState {
@@ -622,6 +628,27 @@ impl SignalState {
         let state = Self::default();
         state.set(signal, level_db, hz);
         state
+    }
+
+    /// Arm a one-pass sweep.
+    ///
+    /// Separate from [`SignalState::set`] because a sweep carries two more
+    /// parameters, and because it must not repeat: deconvolution needs the
+    /// recorded response to contain exactly one pass of the stimulus it is
+    /// divided by.
+    fn set_sweep(&self, start_hz: f32, end_hz: f32, seconds: f32, level_db: f32) {
+        let amplitude = 10.0_f32.powf(level_db.min(0.0) / 20.0);
+        self.kind
+            .store(AnalyzerSignal::Sweep as u32, Ordering::Relaxed);
+        self.amplitude_bits
+            .store(amplitude.to_bits(), Ordering::Relaxed);
+        self.hz_bits
+            .store(start_hz.max(0.0).to_bits(), Ordering::Relaxed);
+        self.end_hz_bits
+            .store(end_hz.max(0.0).to_bits(), Ordering::Relaxed);
+        self.seconds_bits
+            .store(seconds.max(0.0).to_bits(), Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     fn set(&self, signal: AnalyzerSignal, level_db: f32, hz: f32) {
@@ -642,6 +669,14 @@ impl SignalState {
             1 => Signal::Sine { hz, amplitude },
             2 => Signal::WhiteNoise { amplitude },
             3 => Signal::PinkNoise { amplitude },
+            4 => Signal::Sweep {
+                start_hz: hz,
+                end_hz: f32::from_bits(self.end_hz_bits.load(Ordering::Relaxed)),
+                seconds: f32::from_bits(self.seconds_bits.load(Ordering::Relaxed)),
+                amplitude,
+                // One pass. A repeating sweep would overlap its own tail.
+                repeat: false,
+            },
             _ => Signal::Silence,
         }
     }
@@ -691,6 +726,12 @@ pub enum AnalyzerSignal {
     WhiteNoise = 2,
     /// Equal energy per octave. The usual transfer function stimulus.
     PinkNoise = 3,
+    /// Exponential sine sweep, one pass. The swept-measurement stimulus.
+    ///
+    /// Not settable through [`analyzer_session_set_signal`], which has nowhere
+    /// to put a sweep's extra parameters; it is armed by
+    /// [`analyzer_session_start_measurement`].
+    Sweep = 4,
 }
 
 /// A configuration filled with the defaults a UI should start from.
@@ -828,6 +869,11 @@ pub struct AnalyzerSession {
     /// rather than as wide, and so needs its own.
     spectrogram_axis: FrequencyAxis,
     spectrogram_column: Trace,
+    /// The sweep currently being played, if a measurement is running.
+    measuring: Option<MeasurementRun>,
+    /// The last completed measurement.
+    measured: Option<Measured>,
+    measured_trace: Trace,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -1158,6 +1204,9 @@ fn start_session(
         target_trace: Trace::default(),
         spectrogram_axis: FrequencyAxis::audible(600.0),
         spectrogram_column: Trace::default(),
+        measuring: None,
+        measured: None,
+        measured_trace: Trace::default(),
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -2836,6 +2885,517 @@ pub unsafe extern "C" fn analyzer_session_copy_target(
 }
 
 // ---------------------------------------------------------------------------
+// Swept measurement
+//
+// A sweep is played, the response recorded, and the two deconvolved into an
+// impulse response. Everything the measurement reports - the gated frequency
+// response, the decay times, the arrival - falls out of that one impulse
+// response rather than being measured separately.
+// ---------------------------------------------------------------------------
+
+/// Speed of sound used to turn a delay into a distance.
+const SPEED_OF_SOUND: f32 = 343.0;
+
+/// A sweep in progress.
+#[derive(Debug, Clone)]
+struct MeasurementRun {
+    start_hz: f32,
+    end_hz: f32,
+    seconds: f32,
+    gate_ms: f32,
+    fft_size: usize,
+    sample_rate: f32,
+    /// Samples asked for: the sweep plus enough tail to hold the decay.
+    frames: usize,
+}
+
+/// A completed measurement.
+struct Measured {
+    impulse: ImpulseResponse,
+    /// Gated magnitude per bin, in decibels.
+    magnitude_db: Vec<f32>,
+    bin_spacing_hz: f32,
+    result: AnalyzerMeasureResult,
+}
+
+impl std::fmt::Debug for Measured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Measured")
+            .field("points", &self.magnitude_db.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// How a swept measurement is taken.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerMeasureConfig {
+    /// Lowest frequency of the sweep, in hertz.
+    pub start_hz: f32,
+    /// Highest frequency of the sweep, in hertz.
+    pub end_hz: f32,
+    /// Sweep duration in seconds.
+    pub seconds: f32,
+    /// Sweep level in dBFS.
+    pub level_db: f32,
+    /// How long to keep recording after the sweep ends, for the decay.
+    pub tail_seconds: f32,
+    /// Gate length for the quasi-anechoic response, in milliseconds.
+    pub gate_ms: f32,
+    /// Transform size for the gated response.
+    pub fft_size: u32,
+}
+
+impl Default for AnalyzerMeasureConfig {
+    fn default() -> Self {
+        Self {
+            start_hz: 20.0,
+            end_hz: 20_000.0,
+            seconds: 2.0,
+            // Well below full scale. A measurement sweep that defaults to loud
+            // is a measurement sweep that damages something.
+            level_db: -12.0,
+            tail_seconds: 1.0,
+            gate_ms: 5.0,
+            fft_size: 16_384,
+        }
+    }
+}
+
+/// How far a running measurement has got.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerMeasureProgress {
+    /// Whether a sweep is running.
+    pub active: bool,
+    /// Samples captured so far.
+    pub captured: usize,
+    /// Samples the capture is waiting for.
+    pub total: usize,
+    /// Whether the capture is full and ready to finish.
+    pub complete: bool,
+}
+
+/// What a completed measurement found.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerMeasureResult {
+    /// Time of the impulse peak, in milliseconds.
+    ///
+    /// This includes the converter round trip, not just the flight time
+    /// through the air: the sweep is armed and the recording started as two
+    /// separate operations, and nothing synchronises them to a sample. It is
+    /// reported rather than corrected because the correction is a loopback
+    /// reference, which is a measurement in its own right.
+    pub arrival_ms: f32,
+    /// The same as a distance, on the same caveat.
+    pub arrival_metres: f32,
+    /// Largest absolute value in the impulse response.
+    pub peak_amplitude: f32,
+    /// Early decay time, in seconds.
+    pub edt: f32,
+    /// Whether the early decay time could be measured at all.
+    pub has_edt: bool,
+    /// T20, in seconds.
+    pub t20: f32,
+    /// Whether T20 could be measured.
+    pub has_t20: bool,
+    /// T30, in seconds.
+    pub t30: f32,
+    /// Whether T30 could be measured.
+    pub has_t30: bool,
+    /// How far the decay estimates disagree, as a fraction of the largest.
+    /// Above roughly 0.1 the decay is not a straight line and no single number
+    /// describes it.
+    pub decay_spread: f32,
+    /// Whether the spread is meaningful, which needs at least two estimates.
+    pub has_decay_spread: bool,
+    /// Finest frequency the gate can resolve.
+    pub resolution_hz: f32,
+    /// Points in the gated response.
+    pub points: usize,
+}
+
+/// The measurement settings a UI should start from.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_measure_config_default() -> AnalyzerMeasureConfig {
+    AnalyzerMeasureConfig::default()
+}
+
+/// Start a swept measurement.
+///
+/// Arms the recording before the sweep so nothing is missed, then sets the
+/// generator. Fails when the session has no output stream to play through,
+/// which is the common case on a laptop whose input and output are separate
+/// devices.
+///
+/// # Safety
+///
+/// `session` must be null or live. `config` must be readable. `status` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_start_measurement(
+    session: *mut AnalyzerSession,
+    config: *const AnalyzerMeasureConfig,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || config.is_null() {
+        unsafe {
+            set_status(
+                status,
+                AnalyzerStatus::failure("null session or configuration"),
+            )
+        };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let wanted = unsafe { *config };
+
+        let rate = session.engine.config().spectrum.sample_rate;
+        let seconds = wanted.seconds.clamp(0.1, 30.0);
+        let tail = wanted.tail_seconds.clamp(0.0, 10.0);
+        let start_hz = wanted.start_hz.clamp(1.0, rate / 2.0);
+        let end_hz = wanted.end_hz.clamp(start_hz * 1.01, rate / 2.0);
+        let frames = ((seconds + tail) * rate).round().max(1.0) as usize;
+
+        // The deconvolution transform is sized from the recording, and it has
+        // to hold twice it. Refusing here is better than producing a truncated
+        // impulse response that looks like a short room.
+        if frames > 1 << 22 {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("that sweep is longer than the measurement buffer"),
+                );
+            }
+            return false;
+        }
+
+        session.measured = None;
+        // Armed before the sweep starts, so the recording cannot begin partway
+        // through it.
+        session.engine.begin_recording(frames);
+        session
+            .signal
+            .set_sweep(start_hz, end_hz, seconds, wanted.level_db);
+
+        session.measuring = Some(MeasurementRun {
+            start_hz,
+            end_hz,
+            seconds,
+            gate_ms: wanted.gate_ms.clamp(0.5, 500.0),
+            fft_size: (wanted.fft_size as usize).clamp(1024, 131_072),
+            sample_rate: rate,
+            frames,
+        });
+
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// How far a running measurement has got.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_measure_progress(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerMeasureProgress,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &*session };
+        let (captured, total) = session.engine.recording_progress();
+        let progress = AnalyzerMeasureProgress {
+            active: session.measuring.is_some(),
+            captured,
+            total,
+            complete: session.measuring.is_some() && total > 0 && captured >= total,
+        };
+        unsafe { ptr::write(out, progress) };
+        true
+    })
+}
+
+/// Abandon a measurement in progress and silence the generator.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_cancel_measurement(session: *mut AnalyzerSession) {
+    if session.is_null() {
+        return;
+    }
+    guard((), || {
+        let session = unsafe { &mut *session };
+        session.engine.cancel_recording();
+        session.measuring = None;
+        session.signal.set(AnalyzerSignal::Silence, -120.0, 0.0);
+    });
+}
+
+/// Finish a measurement whose recording is complete.
+///
+/// Returns false while the sweep is still playing, so polling this cannot
+/// deconvolve half a sweep and report the result as a measurement.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be null or writable. `status`
+/// must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_finish_measurement(
+    session: *mut AnalyzerSession,
+    out: *mut AnalyzerMeasureResult,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session")) };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(run) = session.measuring.clone() else {
+            unsafe { set_status(status, AnalyzerStatus::failure("no measurement is running")) };
+            return false;
+        };
+        let Some(response) = session.engine.take_recording() else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("the sweep is still playing"),
+                );
+            }
+            return false;
+        };
+
+        session.measuring = None;
+        session.signal.set(AnalyzerSignal::Silence, -120.0, 0.0);
+
+        // The stimulus is regenerated rather than recorded. A sweep is
+        // deterministic, so this is the same signal that was played, and it
+        // costs nothing to keep on the audio thread.
+        let mut generator = Generator::new(
+            run.sample_rate,
+            Signal::Sweep {
+                start_hz: run.start_hz,
+                end_hz: run.end_hz,
+                seconds: run.seconds,
+                amplitude: 1.0,
+                repeat: false,
+            },
+            GENERATOR_SEED,
+        );
+        let mut stimulus = vec![0.0; run.frames];
+        generator.fill(&mut stimulus);
+
+        let mut deconvolver = Deconvolver::new(run.sample_rate, run.frames);
+        let Some(impulse) = deconvolver.deconvolve(&stimulus, &response, DEFAULT_REGULARISATION)
+        else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure(
+                        "nothing was recorded - check the input level and that the sweep played",
+                    ),
+                );
+            }
+            return false;
+        };
+
+        let gate = Gate::anechoic(run.gate_ms / 1000.0);
+        let Some(gated) = gated_response(&impulse, &gate, run.fft_size) else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("the gate is longer than the impulse response"),
+                );
+            }
+            return false;
+        };
+
+        let decay = schroeder_decay(&impulse);
+        let reverb = reverb_time(&decay, run.sample_rate);
+
+        // The peak is the direct arrival. It carries the converter round trip
+        // as well as the flight time - see AnalyzerMeasureResult::arrival_ms.
+        let peak_index = impulse
+            .samples
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .map_or(0, |(index, _)| index);
+        let arrival_seconds = impulse.time_at(peak_index);
+
+        let result = AnalyzerMeasureResult {
+            arrival_ms: arrival_seconds * 1000.0,
+            arrival_metres: arrival_seconds * SPEED_OF_SOUND,
+            peak_amplitude: impulse.peak_amplitude(),
+            edt: reverb.edt.unwrap_or(0.0),
+            has_edt: reverb.edt.is_some(),
+            t20: reverb.t20.unwrap_or(0.0),
+            has_t20: reverb.t20.is_some(),
+            t30: reverb.t30.unwrap_or(0.0),
+            has_t30: reverb.t30.is_some(),
+            decay_spread: reverb.spread().unwrap_or(0.0),
+            has_decay_spread: reverb.spread().is_some(),
+            resolution_hz: gated.resolution_hz,
+            points: gated.magnitude_db.len(),
+        };
+
+        session.measured = Some(Measured {
+            impulse,
+            magnitude_db: gated.magnitude_db,
+            bin_spacing_hz: gated.bin_spacing_hz,
+            result,
+        });
+
+        if !out.is_null() {
+            unsafe { ptr::write(out, result) };
+        }
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// Whether a completed measurement is held.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_has_measurement(session: *const AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || unsafe { (*session).measured.is_some() })
+}
+
+/// Read the last measurement's findings.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_measurement_result(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerMeasureResult,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &*session };
+        match &session.measured {
+            Some(measured) => {
+                unsafe { ptr::write(out, measured.result) };
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Copy the measured response, reduced onto the current axis.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_measured(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        let Some(measured) = &session.measured else {
+            return 0;
+        };
+
+        let columns = session.columns.min(capacity);
+        let spacing = measured.bin_spacing_hz;
+        session.bins.clear();
+        session.bins.extend_from_slice(&measured.magnitude_db);
+
+        reduce(
+            &session.bins,
+            spacing,
+            &session.frequency,
+            columns,
+            session.reduction,
+            &mut session.measured_trace,
+        );
+
+        let written = session.measured_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.measured_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+/// Copy the impulse response itself, decimated to `capacity` points.
+///
+/// Values are amplitudes, normalised to the peak, so a caller can draw the
+/// impulse without knowing the recording level.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_impulse(
+    session: *const AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+    seconds: f32,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 || !seconds.is_finite() || seconds <= 0.0
+    {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &*session };
+        let Some(measured) = &session.measured else {
+            return 0;
+        };
+
+        let rate = measured.impulse.sample_rate;
+        let wanted = ((seconds * rate).round() as usize)
+            .min(measured.impulse.samples.len())
+            .max(1);
+        let peak = measured.impulse.peak_amplitude().max(f32::MIN_POSITIVE);
+
+        // Decimate by taking the largest magnitude in each span rather than
+        // every nth sample: an impulse response is mostly near zero, and
+        // sampling it sparsely would miss the peaks that carry the shape.
+        let written = capacity.min(wanted);
+        for slot in 0..written {
+            let from = slot * wanted / written;
+            let to = ((slot + 1) * wanted / written).max(from + 1);
+            let value = measured.impulse.samples[from..to.min(wanted)]
+                .iter()
+                .copied()
+                .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+                .unwrap_or(0.0);
+            // SAFETY: caller guarantees `capacity` writable floats.
+            unsafe { ptr::write(out.add(slot), value / peak) };
+        }
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Spectrogram
 //
 // One column of data per analysis frame, and nothing more. The renderer keeps a
@@ -4167,6 +4727,86 @@ mod tests {
             analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
         });
         assert_ne!(status.code, 0);
+    }
+
+    // ------------------------------------------------------- measurement --
+
+    #[test]
+    fn measurement_calls_tolerate_null_handles() {
+        let config = analyzer_measure_config_default();
+        let mut progress = AnalyzerMeasureProgress::default();
+        let mut result = AnalyzerMeasureResult::default();
+        let mut status = AnalyzerStatus::default();
+
+        assert!(!unsafe {
+            analyzer_session_start_measurement(ptr::null_mut(), &config, &mut status)
+        });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe { analyzer_session_measure_progress(ptr::null(), &mut progress) });
+        assert!(!unsafe {
+            analyzer_session_finish_measurement(ptr::null_mut(), &mut result, &mut status)
+        });
+        unsafe { analyzer_session_cancel_measurement(ptr::null_mut()) };
+        assert!(!unsafe { analyzer_session_has_measurement(ptr::null()) });
+        assert!(!unsafe { analyzer_session_measurement_result(ptr::null(), &mut result) });
+        assert_eq!(
+            unsafe { analyzer_session_copy_measured(ptr::null_mut(), ptr::null_mut(), 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { analyzer_session_copy_impulse(ptr::null(), ptr::null_mut(), 0, 0.05) },
+            0
+        );
+    }
+
+    /// The sweep defaults must not be loud. A measurement stimulus that starts
+    /// at full scale is one that damages something.
+    #[test]
+    fn the_default_sweep_is_well_below_full_scale() {
+        let config = analyzer_measure_config_default();
+        assert!(config.level_db <= -6.0, "{}", config.level_db);
+        assert!(config.end_hz > config.start_hz);
+        assert!(config.seconds > 0.0);
+        assert!(
+            config.tail_seconds > 0.0,
+            "no tail leaves no decay to measure"
+        );
+    }
+
+    /// A sweep must be one pass. A repeating one would overlap its own tail and
+    /// deconvolve into an impulse response with a second arrival in it.
+    #[test]
+    fn an_armed_sweep_does_not_repeat() {
+        let state = SignalState::default();
+        state.set_sweep(20.0, 20_000.0, 2.0, -12.0);
+        match state.signal() {
+            Signal::Sweep {
+                start_hz,
+                end_hz,
+                seconds,
+                repeat,
+                ..
+            } => {
+                assert!((start_hz - 20.0).abs() < 1e-3);
+                assert!((end_hz - 20_000.0).abs() < 1e-3);
+                assert!((seconds - 2.0).abs() < 1e-6);
+                assert!(!repeat, "a measurement sweep must be a single pass");
+            }
+            other => panic!("expected a sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_degenerate_impulse_window_is_refused() {
+        let mut scratch = [0.0f32; 8];
+        for seconds in [0.0, -1.0, f32::NAN] {
+            assert_eq!(
+                unsafe {
+                    analyzer_session_copy_impulse(ptr::null(), scratch.as_mut_ptr(), 8, seconds)
+                },
+                0
+            );
+        }
     }
 
     // ------------------------------------------------------- spectrogram --
