@@ -16,6 +16,7 @@ struct InspectorView: View {
             case .rta: rta
             case .transfer: transfer
             case .equaliser: EqualiserInspector(model: model)
+            case .spectrogram: spectrogram
             case .traces: TracesInspector(model: model)
             }
         }
@@ -34,6 +35,29 @@ struct InspectorView: View {
             Button("Reset average") { model.session?.resetAverage() }
                 .disabled(!model.isRunning)
         }
+    }
+
+    // ---------------------------------------------------------- spectrogram -
+
+    @ViewBuilder
+    private var spectrogram: some View {
+        Section("Colour") {
+            LabeledContent("Floor") {
+                HStack(spacing: 6) {
+                    Slider(value: $model.spectrogramFloorDb, in: -120...(-20))
+                    Text(String(format: "%.0f dB", model.spectrogramFloorDb))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 52, alignment: .trailing)
+                }
+            }
+            .help("""
+                Bottom of the colour ramp. Spreading it over the whole 120 dB \
+                axis leaves everything but the loudest peaks in one colour.
+                """)
+        }
+
+        AnalysisSettings(model: model)
     }
 
     // ------------------------------------------------------------- transfer -

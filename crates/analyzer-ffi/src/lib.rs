@@ -824,6 +824,10 @@ pub struct AnalyzerSession {
     /// The response a correction is aiming at, and its alignment offset.
     target: TargetCurve,
     target_trace: Trace,
+    /// Frequency axis for the spectrogram, which is as tall as the drawable
+    /// rather than as wide, and so needs its own.
+    spectrogram_axis: FrequencyAxis,
+    spectrogram_column: Trace,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -1152,6 +1156,8 @@ fn start_session(
         eq_trace: Trace::default(),
         target: TargetCurve::default(),
         target_trace: Trace::default(),
+        spectrogram_axis: FrequencyAxis::audible(600.0),
+        spectrogram_column: Trace::default(),
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -2830,6 +2836,129 @@ pub unsafe extern "C" fn analyzer_session_copy_target(
 }
 
 // ---------------------------------------------------------------------------
+// Spectrogram
+//
+// One column of data per analysis frame, and nothing more. The renderer keeps a
+// ring-buffer texture on the GPU, writes this column into it, and scrolls by
+// advancing a texture coordinate.
+//
+// The core must never composite the image. At a Retina drawable of roughly
+// 2800x1600 that is 18 MB per frame, over 2 GB/s of CPU writes at 120 fps -
+// which would make the CPU the frame rate limit and is a restatement of exactly
+// the problem this project exists to avoid.
+// ---------------------------------------------------------------------------
+
+/// Frequency gridlines for an axis of arbitrary length.
+///
+/// The spectrogram runs frequency up the drawable rather than across it, so it
+/// needs tick positions along a different length from the one the trace plot
+/// declared. This builds a temporary axis over the session's current frequency
+/// range and leaves the session's own geometry untouched, so asking does not
+/// disturb what the trace plot is drawing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// [`AnalyzerTick`] values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_frequency_ticks_for(
+    session: *const AnalyzerSession,
+    length: f32,
+    out: *mut AnalyzerTick,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 || !length.is_finite() || length <= 0.0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &*session };
+        let axis = FrequencyAxis::new(
+            session.frequency.min_hz(),
+            session.frequency.max_hz(),
+            length,
+        );
+        let ticks = axis.ticks();
+        let written = ticks.len().min(capacity);
+        for (index, tick) in ticks.iter().take(written).enumerate() {
+            // SAFETY: caller guarantees `capacity` writable ticks.
+            unsafe {
+                ptr::write(
+                    out.add(index),
+                    AnalyzerTick {
+                        value: tick.value,
+                        position: tick.position,
+                        major: tick.major,
+                    },
+                );
+            }
+        }
+        written
+    })
+}
+
+/// Reduce the newest frame onto `rows` frequency positions.
+///
+/// Values are decibels, not colours: mapping level to colour is the renderer's
+/// job and differs per platform. Returns the number of rows written, which is
+/// zero until something has been analysed.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `rows` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_spectrogram_column(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    rows: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || rows == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+
+        // The spectrogram's frequency axis runs up the drawable, so it is sized
+        // by row count rather than by the plot's column count.
+        if (session.spectrogram_axis.width() - rows as f32).abs() > f32::EPSILON
+            || session.spectrogram_axis.min_hz() != session.frequency.min_hz()
+            || session.spectrogram_axis.max_hz() != session.frequency.max_hz()
+        {
+            session.spectrogram_axis = FrequencyAxis::new(
+                session.frequency.min_hz(),
+                session.frequency.max_hz(),
+                rows as f32,
+            );
+        }
+
+        let spacing = {
+            let frame = session.engine.latest();
+            if frame.bins.is_empty() {
+                return 0;
+            }
+            session.bins.clear();
+            session.bins.extend_from_slice(&frame.bins);
+            frame.bin_spacing_hz
+        };
+
+        reduce(
+            &session.bins,
+            spacing,
+            &session.spectrogram_axis,
+            rows,
+            session.reduction,
+            &mut session.spectrogram_column,
+        );
+
+        let written = session.spectrogram_column.points.len().min(rows);
+        // SAFETY: caller guarantees `rows` writable floats, written <= rows.
+        unsafe {
+            ptr::copy_nonoverlapping(session.spectrogram_column.points.as_ptr(), out, written)
+        };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Captured traces
 //
 // The store is a separate handle rather than part of a session, because the
@@ -4038,6 +4167,44 @@ mod tests {
             analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
         });
         assert_ne!(status.code, 0);
+    }
+
+    // ------------------------------------------------------- spectrogram --
+
+    #[test]
+    fn spectrogram_calls_tolerate_null_handles() {
+        let mut scratch = [0.0f32; 8];
+        assert_eq!(
+            unsafe {
+                analyzer_session_copy_spectrogram_column(ptr::null_mut(), scratch.as_mut_ptr(), 8)
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                analyzer_session_copy_spectrogram_column(ptr::null_mut(), ptr::null_mut(), 0)
+            },
+            0
+        );
+
+        let mut ticks = [AnalyzerTick::default(); 8];
+        assert_eq!(
+            unsafe { analyzer_frequency_ticks_for(ptr::null(), 100.0, ticks.as_mut_ptr(), 8) },
+            0
+        );
+    }
+
+    /// A zero or non-finite axis length would divide by zero inside the axis;
+    /// refusing it here is cheaper than checking at every use.
+    #[test]
+    fn a_degenerate_axis_length_is_refused() {
+        let mut ticks = [AnalyzerTick::default(); 8];
+        for length in [0.0, -10.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                unsafe { analyzer_frequency_ticks_for(ptr::null(), length, ticks.as_mut_ptr(), 8) },
+                0
+            );
+        }
     }
 
     // ------------------------------------------------------------ traces --

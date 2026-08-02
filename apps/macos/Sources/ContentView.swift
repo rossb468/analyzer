@@ -26,6 +26,8 @@ struct ContentView: View {
                         EqualiserEditor(model: model)
                             .frame(minHeight: 130, idealHeight: 160)
                     }
+                } else if model.section == .spectrogram {
+                    SpectrogramView(model: model)
                 } else {
                     PlotView(model: model)
                 }

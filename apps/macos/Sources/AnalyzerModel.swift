@@ -14,13 +14,14 @@ import AnalyzerFFI
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case rta
     case transfer
+    case spectrogram
     case equaliser
     case traces
 
     var id: String { rawValue }
 
     /// Sections that decide what the plot draws, listed above the editors.
-    static let analysis: [AppSection] = [.rta, .transfer]
+    static let analysis: [AppSection] = [.rta, .transfer, .spectrogram]
     /// Sections that edit something drawn over whatever analysis is running.
     static let editors: [AppSection] = [.equaliser, .traces]
 
@@ -28,6 +29,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .rta: "RTA"
         case .transfer: "Transfer"
+        case .spectrogram: "Spectrogram"
         case .equaliser: "Equaliser"
         case .traces: "Traces"
         }
@@ -37,6 +39,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .rta: "waveform"
         case .transfer: "arrow.left.arrow.right"
+        case .spectrogram: "square.grid.3x3.fill"
         case .equaliser: "slider.vertical.3"
         case .traces: "square.stack.3d.up"
         }
@@ -48,7 +51,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// The analysis mode this section needs, for the ones that drive the plot.
     var analysisMode: AnalyzerMode? {
         switch self {
-        case .rta: AnalyzerMode_Spectrum
+        case .rta, .spectrogram: AnalyzerMode_Spectrum
         case .transfer: AnalyzerMode_Transfer
         case .equaliser, .traces: nil
         }
@@ -360,6 +363,15 @@ final class AnalyzerModel: ObservableObject {
         session?.trimEq()
         refreshEq()
     }
+
+    // --------------------------------------------------------- spectrogram -
+
+    /// Bottom of the spectrogram's colour ramp.
+    ///
+    /// Deliberately not the trace plot's axis floor. Spreading the ramp over a
+    /// 120 dB span leaves everything but the loudest peaks in the first colour,
+    /// because a room's useful detail sits in the top 60 dB or so.
+    @Published var spectrogramFloorDb: Float = -90
 
     // -------------------------------------------------------------- traces -
 

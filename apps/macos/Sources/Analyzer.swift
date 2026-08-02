@@ -551,6 +551,37 @@ final class AnalyzerSessionHandle {
         return targetStorage[0..<written]
     }
 
+    private var spectrogramStorage: [Float] = []
+
+    /// Copy the newest frame reduced onto `rows` frequency positions.
+    ///
+    /// Decibels, not colours: mapping level to colour is the renderer's job.
+    func copySpectrogramColumn(rows: Int) -> ArraySlice<Float> {
+        guard let handle, rows > 0 else { return [][...] }
+        if spectrogramStorage.count < rows {
+            spectrogramStorage = [Float](repeating: 0, count: rows)
+        }
+        let written = spectrogramStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_spectrogram_column(handle, base, UInt(rows)))
+        }
+        return spectrogramStorage[0..<written]
+    }
+
+    /// Frequency ticks along an axis of `length`, without disturbing the plot
+    /// geometry the trace view declared.
+    func frequencyTicks(along length: Float) -> [GridTick] {
+        guard let handle, length > 0 else { return [] }
+        var raw = [AnalyzerTick](repeating: AnalyzerTick(), count: 64)
+        let count = raw.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_frequency_ticks_for(handle, length, base, UInt(buffer.count)))
+        }
+        return raw.prefix(count).map {
+            GridTick(value: $0.value, position: $0.position, major: $0.major)
+        }
+    }
+
     /// Capture the live curve into `store`.
     ///
     /// The store is passed in rather than owned here because it has to outlive
