@@ -302,11 +302,31 @@ fn combining_input_modes_is_an_error() {
     }
 }
 
+/// Enumerating devices must not need capture permission. macOS prompts for the
+/// microphone on the first *capture*, and a device list that tripped that
+/// prompt would make the harness unusable for the one thing it is best at:
+/// finding out what the machine can see before anything is recorded.
+#[cfg(target_os = "macos")]
 #[test]
 fn list_devices_succeeds_without_capture_permission() {
     let output = run(&["--list-devices"]);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Audio devices"));
+}
+
+/// Where there is no backend, the flag still parses and fails with an
+/// explanation rather than vanishing from the interface or panicking.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn list_devices_explains_that_there_is_no_backend() {
+    let output = run(&["--list-devices"]);
+    assert!(!output.status.success(), "should fail, not pretend");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("platform audio backend"),
+        "should say what is missing, got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "should be a clean error");
 }
 
 #[test]
