@@ -29,6 +29,8 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 | Headless harness | `cargo run -p analyzer-cli -- --help` |
 | Performance | `cargo run --release -p analyzer-cli -- --bench` |
 | End-to-end sanity | `cargo run --release -p analyzer-cli -- --measure-demo` |
+| Write a test signal | `cargo run -p analyzer-cli -- --generate pink --out pink.wav` |
+| Compare two exports | `cargo run -p analyzer-cli -- --compare ours.txt theirs.txt` |
 
 `./check.sh` must be green before every commit. It is not decorative: three
 broken commits shipped before it was fixed.
@@ -164,5 +166,12 @@ Settings window.
 Windows and Linux clients.
 
 **The one unmet plan commitment** is the REW parity run: ±0.1 dB on synthetic
-signals and ±0.5 dB on a real measurement, 20 Hz to 20 kHz. The harness exists
-and internal consistency is verified, which is a weaker claim than parity.
+signals and ±0.5 dB on a real measurement, 20 Hz to 20 kHz. Internal consistency
+is verified, which is a weaker claim than parity.
+
+Everything on this side is built: `--generate` writes the test signals,
+`--compare` measures agreement and gates on it, and `docs/REW-PARITY.md` is the
+procedure. What remains is REW's own import and export, which is manual until
+its API on `localhost:4735` is used to automate it. Read that document before
+attempting the run - most of the difficulty is in matching REW's analysis
+settings, not in the comparison.

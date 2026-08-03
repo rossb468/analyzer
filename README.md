@@ -40,10 +40,14 @@ starts with.
 | Equalisers | 10-band graphic on ISO octaves, and free parametric |
 | Sweep deconvolution | Regularised, recovering an impulse response |
 | Impulse analysis | Gating, gated response, Schroeder decay, EDT/T20/T30 |
+| Target curves | Flat, tilt, room, or points from a file |
+| PEQ optimiser | Greedy fit with local refinement, boost capped well below cut |
+| Filter export | REW, Equalizer APO, miniDSP biquads |
 | Measurement model | Types, store, versioned file format, REW text export |
+| Signal files | Sine, noise and sweeps written as WAV, reproducibly |
+| Comparison | Two exports against each other, offset separated from shape |
 | CoreAudio backend | Capture and playback, aggregate devices, verified live |
 | Engine | Lock-free ring, analysis thread, snapshot publication |
-| macOS app | RTA, transfer function, generator, equaliser, save and export |
 
 ## Building
 
@@ -103,6 +107,21 @@ Or deconvolve a real pair of recordings:
 ```bash
 cargo run --release -p analyzer-cli -- --measure stimulus.wav response.wav
 ```
+
+Write a test signal, then analyse it and compare the result against another
+analyser's export. Generation is deterministic, so the same command always
+produces the same file:
+
+```bash
+cargo run -q -p analyzer-cli -- --generate pink --seconds 8 --out pink.wav
+cargo run -q -p analyzer-cli -- pink.wav --fft 8192 --window hann > ours.txt
+cargo run -q -p analyzer-cli -- --compare ours.txt theirs.txt --tolerance 0.1
+```
+
+That last command is the REW parity check; `docs/REW-PARITY.md` is the
+procedure. It reports a constant offset separately from the disagreement in
+shape, because the first is a reference convention and only the second is a
+defect.
 
 ## Performance
 
@@ -190,14 +209,20 @@ one `cfg(target_os = "macos")` module, and the client repositories.
 
 The plan's own exit criterion for the headless core is a numeric match against
 REW: ±0.1 dB on synthetic signals and ±0.5 dB on a real measurement, 20 Hz to
-20 kHz. **That comparison has not been run.** Internal consistency is verified
-against analytically known answers throughout, which is a different and weaker
-claim.
+20 kHz. **That comparison has still not been run.** Internal consistency is
+verified against analytically known answers throughout, which is a different and
+weaker claim.
 
-Also outstanding: scope view, trace capture and overlay, the running
-spectrogram, group delay, minimum-phase decomposition, target curves, an
-automatic PEQ optimiser, filter export to hardware, and the Windows and Linux
-clients.
+Everything needed to run it now exists — `--generate`, `--compare`, and the
+procedure in `docs/REW-PARITY.md`. What is missing is REW's own half: importing
+each file and exporting its measurement, which is manual until REW's API is
+used to automate it.
+
+Also outstanding: scope view, group delay, minimum-phase decomposition, and the
+Windows and Linux clients.
+
+The macOS client lives in [its own repository](https://github.com/rossb468/analyzer-macos) and consumes this one as a
+pinned submodule.
 
 ## A note on microphone permission
 

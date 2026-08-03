@@ -177,9 +177,22 @@ minimum-phase decomposition, and the Windows and Linux clients.
 
 **The REW parity run has never been executed.** The exit criterion is ±0.1 dB
 against REW on synthetic signals and ±0.5 dB on a real measurement, 20 Hz to
-20 kHz. The harness exists — feed identical WAV input through `analyzer-cli`
-and through REW, compare the exported magnitude — and internal consistency is
-verified, which is a strictly weaker claim.
+20 kHz. Internal consistency is verified, which is a strictly weaker claim.
+
+Every part of it on this side now exists: `--generate` writes deterministic test
+signals as WAV, `--compare` reads two frequency/level exports and reports how
+far apart they are, and `docs/REW-PARITY.md` is the procedure. The comparison
+reports a constant offset separately from the deviation that survives removing
+it, because those mean different things — a constant offset is a reference
+convention such as full-scale sine against full-scale square, or per-bin level
+against power per hertz, and only a frequency-dependent deviation is a defect.
+
+What is missing is REW's own half: importing each file and exporting its
+measurement. That is manual, because REW's GUI cannot be driven from a terminal
+session; its API on `localhost:4735` would automate it. Most of the remaining
+difficulty is in matching REW's analysis settings rather than in the comparison,
+and `docs/REW-PARITY.md` lists the ones that decide whether the run means
+anything.
 
 This was Milestone 0's gate and three milestones have been built past it. If
 parity turns up a systematic offset — a window amplitude correction, an FFT
@@ -222,7 +235,7 @@ retrofit:
 Roughly in the order they earn their keep.
 
 1. **Run the REW parity check.** See above. Everything else is building on an
-   unverified foundation.
+   unverified foundation, and the only part still missing is REW's own export.
 2. **Scope view.** The one Milestone 1 item never built. A time-domain view of
    live inputs is how you find a clipping preamp or a dead channel, and right
    now the app cannot show you the waveform at all.
