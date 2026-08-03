@@ -3,8 +3,13 @@
 A native replacement for Room EQ Wizard. Rust core, native UI per platform,
 macOS first and deep before any other client starts.
 
-The full plan — architecture, milestones, performance targets, REW-compatibility
-guardrails — lives at `~/.claude/plans/radiant-twirling-lerdorf.md`.
+`docs/HANDOFF.md` is the longer narrative: why the architecture is shaped this
+way, what is built, what is not, and what to do next. Read it when you need the
+reasoning rather than the rules.
+
+The original plan — milestones, performance targets, REW-compatibility
+guardrails — lives at `~/.claude/plans/radiant-twirling-lerdorf.md`, outside the
+repository. `docs/HANDOFF.md` carries everything from it that still matters.
 
 ## Environment
 
@@ -97,9 +102,13 @@ Each of these cost real time. Most now have a guard or a regression test.
 - **`DRAIN_FRAMES` in `engine.rs` is load-bearing, not a tuning knob.** Draining
   the ring until empty lets a fast producer starve publication — 7332 frames
   analysed, 0 published. Test: `a_fast_producer_cannot_starve_publication`.
-- **Delay tests must use a continuous stream.** A repeated block is periodic and
-  cross-correlation genuinely cannot tell a delay of `d` from `d` minus the
-  period; the finder correctly reported −3968 for a 128-sample delay.
+- **Feed tests a continuous stream, never a repeated block.** A repeated block
+  is periodic, and that periodicity is never what the test is measuring. It has
+  bitten twice: the delay finder correctly reported −3968 for a 128-sample delay,
+  because cross-correlation cannot tell `d` from `d` minus the period; and the
+  engine's average-reset test re-sent 5.3125 cycles, whose phase discontinuity
+  smeared the tone off its bin and made the assertion depend on timing. Wrap a
+  rolling offset through a buffer holding a whole number of cycles.
 - **Measure filter response by RMS, never peak.** Sampling a sine rarely lands
   on its crest; at 4 kHz that understates amplitude by 0.3 dB.
 - **Deconvolution output must be trimmed to the recording length.** Circular
