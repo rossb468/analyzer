@@ -1,0 +1,100 @@
+name: Core
+
+# The portable half: every crate under crates/ plus the headless harness.
+#
+# Runs on three platforms deliberately. The core is meant to be buildable and
+# testable without an audio stack, a window server or an Apple SDK, and the only
+# way that claim stays true is if a machine checks it on every push. Linux is
+# where it breaks first, because it has none of the three.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'check.sh'
+      - '.github/workflows/core.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'check.sh'
+      - '.github/workflows/core.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others: a compile error on
+      # Linux and a test failure on Windows are different problems and both are
+      # worth seeing in the same run.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-${{ matrix.os }}
+
+      # Formatting is platform-independent, so checking it once is enough.
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+
+      # The FFI crate is excluded here: it is the boundary to the platform UI
+      # and is covered by its own workflow. Everything below it must build with
+      # no platform audio backend at all.
+      - name: Clippy
+        run: >
+          cargo clippy --all-targets --all-features
+          -p analyzer-dsp -p analyzer-cal -p analyzer-plot -p analyzer-model
+          -p analyzer-engine -p analyzer-audio -p analyzer-cli
+
+      - name: Test
+        run: >
+          cargo test --all-features
+          -p analyzer-dsp -p analyzer-cal -p analyzer-plot -p analyzer-model
+          -p analyzer-engine -p analyzer-audio -p analyzer-cli
+
+      # The allocation trap only proves anything when it actually runs. A debug
+      # build registers the tracking allocator, so if the audio callback
+      # allocates the process aborts and this step fails - rather than the
+      # violation shipping and surfacing as an intermittent click in the field.
+      - name: Real-time safety harness
+        run: cargo run -p analyzer-cli -- --sine 1000 --seconds 1 --window flattop --peak
+
+      # A known-answer check on the whole chain: an on-bin sine at half scale
+      # must read -6.02 dBFS. Catches an FFT scaling, window correction or dBFS
+      # reference error that unit tests could all individually pass through.
+      #
+      # Bash on every runner, Windows included, so this is written once.
+      - name: Known-answer level check
+        shell: bash
+        run: |
+          level=$(cargo run -q -p analyzer-cli -- \
+            --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak \
+            | grep -v '^#' | cut -f2)
+          echo "measured: $level dBFS (expected -6.0206)"
+          awk -v got="$level" 'BEGIN { exit (got - -6.0206 < 0.02 && got - -6.0206 > -0.02) ? 0 : 1 }'
+
+      # End to end over a synthetic room with a known geometry: proves the sweep,
+      # deconvolution, gating and decay chain on a platform with no audio device.
+      - name: Swept measurement
+        run: cargo run --release -p analyzer-cli -- --measure-demo
