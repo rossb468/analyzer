@@ -12,4 +12,5 @@ workspace = true
 
 [dependencies]
 analyzer-dsp = { workspace = true }
+hound = { workspace = true }
 rustfft = { workspace = true }
