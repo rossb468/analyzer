@@ -57,6 +57,7 @@ name = "analyzer-ffi"
 version = "0.1.0"
 dependencies = [
  "analyzer-audio",
+ "analyzer-cal",
  "analyzer-dsp",
  "analyzer-engine",
  "analyzer-model",
@@ -68,6 +69,7 @@ dependencies = [
 name = "analyzer-model"
 version = "0.1.0"
 dependencies = [
+ "analyzer-dsp",
  "rustfft",
 ]
 

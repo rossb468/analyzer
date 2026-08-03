@@ -34,15 +34,22 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use analyzer_audio::{
     AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
 };
+use analyzer_dsp::deconv::DEFAULT_REGULARISATION;
+use analyzer_dsp::target::{ALIGN_FROM_HZ, ALIGN_TO_HZ};
 use analyzer_dsp::{
-    Averaging, Biquad, DistortionConfig, Equaliser, FilterBand, FilterKind, Generator, Overlap,
-    Signal, SpectrumConfig, WindowKind,
+    Averaging, Biquad, Deconvolver, DistortionConfig, Equaliser, FilterBand, FilterKind, Gate,
+    Generator, ImpulseResponse, OptimiserConfig, Overlap, Signal, SpectrumConfig, TargetCurve,
+    TargetShape, WindowKind, gated_response, reverb_time, schroeder_decay,
 };
 use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
     snapshot_channel,
 };
-use analyzer_model::{Measurement, MeasurementData, MeasurementId, References};
+use analyzer_model::settings::{AveragingChoice, WindowChoice};
+use analyzer_model::{
+    FilterFormat, Measurement, MeasurementData, MeasurementId, MeasurementStore, References,
+    Settings,
+};
 use analyzer_plot::{
     FrequencyAxis, LevelAxis, LinearReduction, Reduction, Trace, reduce, reduce_linear,
 };
@@ -610,6 +617,10 @@ struct SignalState {
     kind: AtomicU32,
     amplitude_bits: AtomicU32,
     hz_bits: AtomicU32,
+    /// Upper end of a sweep. Unused by every other signal.
+    end_hz_bits: AtomicU32,
+    /// Sweep duration in seconds. Unused by every other signal.
+    seconds_bits: AtomicU32,
 }
 
 impl SignalState {
@@ -617,6 +628,27 @@ impl SignalState {
         let state = Self::default();
         state.set(signal, level_db, hz);
         state
+    }
+
+    /// Arm a one-pass sweep.
+    ///
+    /// Separate from [`SignalState::set`] because a sweep carries two more
+    /// parameters, and because it must not repeat: deconvolution needs the
+    /// recorded response to contain exactly one pass of the stimulus it is
+    /// divided by.
+    fn set_sweep(&self, start_hz: f32, end_hz: f32, seconds: f32, level_db: f32) {
+        let amplitude = 10.0_f32.powf(level_db.min(0.0) / 20.0);
+        self.kind
+            .store(AnalyzerSignal::Sweep as u32, Ordering::Relaxed);
+        self.amplitude_bits
+            .store(amplitude.to_bits(), Ordering::Relaxed);
+        self.hz_bits
+            .store(start_hz.max(0.0).to_bits(), Ordering::Relaxed);
+        self.end_hz_bits
+            .store(end_hz.max(0.0).to_bits(), Ordering::Relaxed);
+        self.seconds_bits
+            .store(seconds.max(0.0).to_bits(), Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     fn set(&self, signal: AnalyzerSignal, level_db: f32, hz: f32) {
@@ -637,6 +669,14 @@ impl SignalState {
             1 => Signal::Sine { hz, amplitude },
             2 => Signal::WhiteNoise { amplitude },
             3 => Signal::PinkNoise { amplitude },
+            4 => Signal::Sweep {
+                start_hz: hz,
+                end_hz: f32::from_bits(self.end_hz_bits.load(Ordering::Relaxed)),
+                seconds: f32::from_bits(self.seconds_bits.load(Ordering::Relaxed)),
+                amplitude,
+                // One pass. A repeating sweep would overlap its own tail.
+                repeat: false,
+            },
             _ => Signal::Silence,
         }
     }
@@ -686,6 +726,12 @@ pub enum AnalyzerSignal {
     WhiteNoise = 2,
     /// Equal energy per octave. The usual transfer function stimulus.
     PinkNoise = 3,
+    /// Exponential sine sweep, one pass. The swept-measurement stimulus.
+    ///
+    /// Not settable through [`analyzer_session_set_signal`], which has nowhere
+    /// to put a sweep's extra parameters; it is armed by
+    /// [`analyzer_session_start_measurement`].
+    Sweep = 4,
 }
 
 /// A configuration filled with the defaults a UI should start from.
@@ -816,6 +862,18 @@ pub struct AnalyzerSession {
     /// Rebuilt only when the geometry changes.
     column_hz: Vec<f32>,
     eq_trace: Trace,
+    /// The response a correction is aiming at, and its alignment offset.
+    target: TargetCurve,
+    target_trace: Trace,
+    /// Frequency axis for the spectrogram, which is as tall as the drawable
+    /// rather than as wide, and so needs its own.
+    spectrogram_axis: FrequencyAxis,
+    spectrogram_column: Trace,
+    /// The sweep currently being played, if a measurement is running.
+    measuring: Option<MeasurementRun>,
+    /// The last completed measurement.
+    measured: Option<Measured>,
+    measured_trace: Trace,
     bins: Vec<f32>,
     /// Scratch for the distortion analysis, which needs linear power.
     power: Vec<f32>,
@@ -1142,6 +1200,13 @@ fn start_session(
         eq_generation: 0,
         column_hz: Vec::new(),
         eq_trace: Trace::default(),
+        target: TargetCurve::default(),
+        target_trace: Trace::default(),
+        spectrogram_axis: FrequencyAxis::audible(600.0),
+        spectrogram_column: Trace::default(),
+        measuring: None,
+        measured: None,
+        measured_trace: Trace::default(),
         bins: Vec::new(),
         power: Vec::new(),
         device_name: device.name,
@@ -1479,6 +1544,113 @@ pub unsafe extern "C" fn analyzer_session_set_signal(
 }
 
 impl AnalyzerSession {
+    /// Describe the target for the UI.
+    fn target_description(&self) -> AnalyzerTarget {
+        let mut out = AnalyzerTarget {
+            offset_db: self.target.offset_db(),
+            has_custom: self.has_custom_target(),
+            ..AnalyzerTarget::default()
+        };
+        match self.target.shape() {
+            TargetShape::Flat => out.shape = AnalyzerTargetShape::Flat,
+            TargetShape::Tilt { db_per_octave } => {
+                out.shape = AnalyzerTargetShape::Tilt;
+                out.db_per_octave = *db_per_octave;
+            }
+            TargetShape::Room {
+                shelf_db,
+                transition_hz,
+                db_per_octave,
+            } => {
+                out.shape = AnalyzerTargetShape::Room;
+                out.shelf_db = *shelf_db;
+                out.transition_hz = *transition_hz;
+                out.db_per_octave = *db_per_octave;
+            }
+            TargetShape::Custom { .. } => out.shape = AnalyzerTargetShape::Custom,
+        }
+        out
+    }
+
+    /// Whether a custom curve has been loaded and has points in it.
+    fn has_custom_target(&self) -> bool {
+        self.custom_points()
+            .is_some_and(|points| !points.is_empty())
+    }
+
+    /// The loaded custom points, kept so switching shapes and back does not
+    /// discard a file the user chose.
+    fn custom_points(&self) -> Option<&[(f32, f32)]> {
+        match self.target.shape() {
+            TargetShape::Custom { points } => Some(points),
+            _ => None,
+        }
+    }
+
+    /// Apply a shape chosen in the UI.
+    fn apply_target(&mut self, wanted: AnalyzerTarget) {
+        let shape = match wanted.shape {
+            AnalyzerTargetShape::Flat => TargetShape::Flat,
+            AnalyzerTargetShape::Tilt => TargetShape::Tilt {
+                db_per_octave: wanted.db_per_octave,
+            },
+            AnalyzerTargetShape::Room => TargetShape::Room {
+                shelf_db: wanted.shelf_db,
+                transition_hz: wanted.transition_hz,
+                db_per_octave: wanted.db_per_octave,
+            },
+            // Selecting Custom without a loaded file would evaluate to nothing.
+            // Keeping the points already there, or falling back to flat, is
+            // more honest than drawing a curve that is silently absent.
+            AnalyzerTargetShape::Custom => match self.custom_points() {
+                Some(points) => TargetShape::Custom {
+                    points: points.to_vec(),
+                },
+                None => TargetShape::Flat,
+            },
+        };
+        self.target.set_shape(shape);
+        self.target.set_offset_db(wanted.offset_db);
+    }
+
+    /// The latest measurement sampled at the frequencies the plot draws at.
+    ///
+    /// Both alignment and the fit work from this rather than from raw bins, so
+    /// what they operate on is what is on screen, and the points are
+    /// log-spaced - which is what makes every octave carry equal weight in the
+    /// fit rather than the top one dominating.
+    fn measured_at_columns(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let columns = self.columns;
+        self.columns_hz(columns);
+
+        let frame = self.engine.latest();
+        if frame.bins.is_empty() {
+            return None;
+        }
+        let levels: Vec<f32> = self
+            .column_hz
+            .iter()
+            .take(columns)
+            .map(|hz| {
+                let bin = (hz / frame.bin_spacing_hz).round() as usize;
+                frame.bins.get(bin).copied().unwrap_or(f32::NAN)
+            })
+            .collect();
+
+        let frequencies: Vec<f32> = self.column_hz.iter().take(columns).copied().collect();
+        Some((frequencies, levels))
+    }
+
+    /// Align the target to the latest analysed frame.
+    fn align_target(&mut self) -> bool {
+        let Some((frequencies, levels)) = self.measured_at_columns() else {
+            return false;
+        };
+        self.target
+            .align_to(&frequencies, &levels, ALIGN_FROM_HZ, ALIGN_TO_HZ);
+        true
+    }
+
     /// The equaliser the current mode selects.
     fn equaliser(&self) -> Option<&Equaliser> {
         match self.eq_mode {
@@ -2489,6 +2661,1708 @@ pub unsafe extern "C" fn analyzer_level_ticks(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Target curves
+// ---------------------------------------------------------------------------
+
+/// Which target shape is selected.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzerTargetShape {
+    /// Flat at every frequency.
+    Flat = 0,
+    /// A constant slope in decibels per octave.
+    Tilt = 1,
+    /// A bass shelf with an optional tilt above it.
+    Room = 2,
+    /// Points loaded from a file.
+    Custom = 3,
+}
+
+/// A target curve, as a flat POD struct.
+///
+/// The shape parameters are all carried regardless of which shape is selected,
+/// so switching between them and back does not lose what was set.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerTarget {
+    /// Which shape is evaluated.
+    pub shape: AnalyzerTargetShape,
+    /// Lift at the bottom of the band, for [`AnalyzerTargetShape::Room`].
+    pub shelf_db: f32,
+    /// Where the shelf reaches half its lift, in hertz.
+    pub transition_hz: f32,
+    /// Slope in decibels per octave, zero at 1 kHz.
+    pub db_per_octave: f32,
+    /// Alignment offset currently applied.
+    pub offset_db: f32,
+    /// Whether a custom curve has been loaded and has points.
+    pub has_custom: bool,
+}
+
+impl Default for AnalyzerTarget {
+    fn default() -> Self {
+        let TargetShape::Room {
+            shelf_db,
+            transition_hz,
+            db_per_octave,
+        } = TargetShape::room()
+        else {
+            unreachable!("TargetShape::room is a Room")
+        };
+        Self {
+            shape: AnalyzerTargetShape::Flat,
+            shelf_db,
+            transition_hz,
+            db_per_octave,
+            offset_db: 0.0,
+            has_custom: false,
+        }
+    }
+}
+
+/// The target a fresh session starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_target_default() -> AnalyzerTarget {
+    AnalyzerTarget::default()
+}
+
+/// Read the session's target.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_target(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerTarget,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        unsafe { ptr::write(out, (*session).target_description()) };
+        true
+    })
+}
+
+/// Replace the session's target shape.
+///
+/// Selecting [`AnalyzerTargetShape::Custom`] without a loaded curve leaves the
+/// shape flat rather than silently evaluating to nothing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `target` must be readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_set_target(
+    session: *mut AnalyzerSession,
+    target: *const AnalyzerTarget,
+) -> bool {
+    if session.is_null() || target.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let wanted = unsafe { *target };
+        session.apply_target(wanted);
+        true
+    })
+}
+
+/// Load a custom target from a frequency/level text file and select it.
+///
+/// # Safety
+///
+/// `session` must be null or live. `path` must be a NUL-terminated C string.
+/// `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_load_target(
+    session: *mut AnalyzerSession,
+    path: *const c_char,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("reading {path}: {error}")),
+                    );
+                }
+                return false;
+            }
+        };
+
+        // The calibration parser already handles the frequency/level text these
+        // files ship as, including the comment and header conventions.
+        let curve = analyzer_cal::ResponseCurve::parse(&text);
+        if curve.points().is_empty() {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("no frequency and level pairs found in that file"),
+                );
+            }
+            return false;
+        }
+
+        let session = unsafe { &mut *session };
+        session
+            .target
+            .set_shape(TargetShape::custom(curve.points().to_vec()));
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// Align the target to the current measurement over the default band.
+///
+/// A target is relative, so without this it floats somewhere unrelated to the
+/// measurement and every error computed against it is dominated by a constant.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_align_target(session: *mut AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        session.align_target()
+    })
+}
+
+/// Copy the target curve, one level per pixel column.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_target(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        let columns = session.columns.min(capacity);
+        session.columns_hz(columns);
+
+        session.target_trace.points.clear();
+        session.target_trace.points.reserve(columns);
+        // Split the borrow: the target reads while the trace is written.
+        let target = &session.target;
+        for hz in session.column_hz.iter().take(columns) {
+            session.target_trace.points.push(target.db_at(*hz));
+        }
+
+        let written = session.target_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.target_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Swept measurement
+//
+// A sweep is played, the response recorded, and the two deconvolved into an
+// impulse response. Everything the measurement reports - the gated frequency
+// response, the decay times, the arrival - falls out of that one impulse
+// response rather than being measured separately.
+// ---------------------------------------------------------------------------
+
+/// Speed of sound used to turn a delay into a distance.
+const SPEED_OF_SOUND: f32 = 343.0;
+
+/// A sweep in progress.
+#[derive(Debug, Clone)]
+struct MeasurementRun {
+    start_hz: f32,
+    end_hz: f32,
+    seconds: f32,
+    gate_ms: f32,
+    fft_size: usize,
+    sample_rate: f32,
+    /// Samples asked for: the sweep plus enough tail to hold the decay.
+    frames: usize,
+}
+
+/// A completed measurement.
+struct Measured {
+    impulse: ImpulseResponse,
+    /// Gated magnitude per bin, in decibels.
+    magnitude_db: Vec<f32>,
+    bin_spacing_hz: f32,
+    result: AnalyzerMeasureResult,
+}
+
+impl std::fmt::Debug for Measured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Measured")
+            .field("points", &self.magnitude_db.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// How a swept measurement is taken.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerMeasureConfig {
+    /// Lowest frequency of the sweep, in hertz.
+    pub start_hz: f32,
+    /// Highest frequency of the sweep, in hertz.
+    pub end_hz: f32,
+    /// Sweep duration in seconds.
+    pub seconds: f32,
+    /// Sweep level in dBFS.
+    pub level_db: f32,
+    /// How long to keep recording after the sweep ends, for the decay.
+    pub tail_seconds: f32,
+    /// Gate length for the quasi-anechoic response, in milliseconds.
+    pub gate_ms: f32,
+    /// Transform size for the gated response.
+    pub fft_size: u32,
+}
+
+impl Default for AnalyzerMeasureConfig {
+    fn default() -> Self {
+        Self {
+            start_hz: 20.0,
+            end_hz: 20_000.0,
+            seconds: 2.0,
+            // Well below full scale. A measurement sweep that defaults to loud
+            // is a measurement sweep that damages something.
+            level_db: -12.0,
+            tail_seconds: 1.0,
+            gate_ms: 5.0,
+            fft_size: 16_384,
+        }
+    }
+}
+
+/// How far a running measurement has got.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerMeasureProgress {
+    /// Whether a sweep is running.
+    pub active: bool,
+    /// Samples captured so far.
+    pub captured: usize,
+    /// Samples the capture is waiting for.
+    pub total: usize,
+    /// Whether the capture is full and ready to finish.
+    pub complete: bool,
+}
+
+/// What a completed measurement found.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerMeasureResult {
+    /// Time of the impulse peak, in milliseconds.
+    ///
+    /// This includes the converter round trip, not just the flight time
+    /// through the air: the sweep is armed and the recording started as two
+    /// separate operations, and nothing synchronises them to a sample. It is
+    /// reported rather than corrected because the correction is a loopback
+    /// reference, which is a measurement in its own right.
+    pub arrival_ms: f32,
+    /// The same as a distance, on the same caveat.
+    pub arrival_metres: f32,
+    /// Largest absolute value in the impulse response.
+    pub peak_amplitude: f32,
+    /// Early decay time, in seconds.
+    pub edt: f32,
+    /// Whether the early decay time could be measured at all.
+    pub has_edt: bool,
+    /// T20, in seconds.
+    pub t20: f32,
+    /// Whether T20 could be measured.
+    pub has_t20: bool,
+    /// T30, in seconds.
+    pub t30: f32,
+    /// Whether T30 could be measured.
+    pub has_t30: bool,
+    /// How far the decay estimates disagree, as a fraction of the largest.
+    /// Above roughly 0.1 the decay is not a straight line and no single number
+    /// describes it.
+    pub decay_spread: f32,
+    /// Whether the spread is meaningful, which needs at least two estimates.
+    pub has_decay_spread: bool,
+    /// Finest frequency the gate can resolve.
+    pub resolution_hz: f32,
+    /// Points in the gated response.
+    pub points: usize,
+}
+
+/// The measurement settings a UI should start from.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_measure_config_default() -> AnalyzerMeasureConfig {
+    AnalyzerMeasureConfig::default()
+}
+
+/// Start a swept measurement.
+///
+/// Arms the recording before the sweep so nothing is missed, then sets the
+/// generator. Fails when the session has no output stream to play through,
+/// which is the common case on a laptop whose input and output are separate
+/// devices.
+///
+/// # Safety
+///
+/// `session` must be null or live. `config` must be readable. `status` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_start_measurement(
+    session: *mut AnalyzerSession,
+    config: *const AnalyzerMeasureConfig,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || config.is_null() {
+        unsafe {
+            set_status(
+                status,
+                AnalyzerStatus::failure("null session or configuration"),
+            )
+        };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let wanted = unsafe { *config };
+
+        let rate = session.engine.config().spectrum.sample_rate;
+        let seconds = wanted.seconds.clamp(0.1, 30.0);
+        let tail = wanted.tail_seconds.clamp(0.0, 10.0);
+        let start_hz = wanted.start_hz.clamp(1.0, rate / 2.0);
+        let end_hz = wanted.end_hz.clamp(start_hz * 1.01, rate / 2.0);
+        let frames = ((seconds + tail) * rate).round().max(1.0) as usize;
+
+        // The deconvolution transform is sized from the recording, and it has
+        // to hold twice it. Refusing here is better than producing a truncated
+        // impulse response that looks like a short room.
+        if frames > 1 << 22 {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("that sweep is longer than the measurement buffer"),
+                );
+            }
+            return false;
+        }
+
+        session.measured = None;
+        // Armed before the sweep starts, so the recording cannot begin partway
+        // through it.
+        session.engine.begin_recording(frames);
+        session
+            .signal
+            .set_sweep(start_hz, end_hz, seconds, wanted.level_db);
+
+        session.measuring = Some(MeasurementRun {
+            start_hz,
+            end_hz,
+            seconds,
+            gate_ms: wanted.gate_ms.clamp(0.5, 500.0),
+            fft_size: (wanted.fft_size as usize).clamp(1024, 131_072),
+            sample_rate: rate,
+            frames,
+        });
+
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// How far a running measurement has got.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_measure_progress(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerMeasureProgress,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &*session };
+        let (captured, total) = session.engine.recording_progress();
+        let progress = AnalyzerMeasureProgress {
+            active: session.measuring.is_some(),
+            captured,
+            total,
+            complete: session.measuring.is_some() && total > 0 && captured >= total,
+        };
+        unsafe { ptr::write(out, progress) };
+        true
+    })
+}
+
+/// Abandon a measurement in progress and silence the generator.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_cancel_measurement(session: *mut AnalyzerSession) {
+    if session.is_null() {
+        return;
+    }
+    guard((), || {
+        let session = unsafe { &mut *session };
+        session.engine.cancel_recording();
+        session.measuring = None;
+        session.signal.set(AnalyzerSignal::Silence, -120.0, 0.0);
+    });
+}
+
+/// Finish a measurement whose recording is complete.
+///
+/// Returns false while the sweep is still playing, so polling this cannot
+/// deconvolve half a sweep and report the result as a measurement.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be null or writable. `status`
+/// must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_finish_measurement(
+    session: *mut AnalyzerSession,
+    out: *mut AnalyzerMeasureResult,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session")) };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let Some(run) = session.measuring.clone() else {
+            unsafe { set_status(status, AnalyzerStatus::failure("no measurement is running")) };
+            return false;
+        };
+        let Some(response) = session.engine.take_recording() else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("the sweep is still playing"),
+                );
+            }
+            return false;
+        };
+
+        session.measuring = None;
+        session.signal.set(AnalyzerSignal::Silence, -120.0, 0.0);
+
+        // The stimulus is regenerated rather than recorded. A sweep is
+        // deterministic, so this is the same signal that was played, and it
+        // costs nothing to keep on the audio thread.
+        let mut generator = Generator::new(
+            run.sample_rate,
+            Signal::Sweep {
+                start_hz: run.start_hz,
+                end_hz: run.end_hz,
+                seconds: run.seconds,
+                amplitude: 1.0,
+                repeat: false,
+            },
+            GENERATOR_SEED,
+        );
+        let mut stimulus = vec![0.0; run.frames];
+        generator.fill(&mut stimulus);
+
+        let mut deconvolver = Deconvolver::new(run.sample_rate, run.frames);
+        let Some(impulse) = deconvolver.deconvolve(&stimulus, &response, DEFAULT_REGULARISATION)
+        else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure(
+                        "nothing was recorded - check the input level and that the sweep played",
+                    ),
+                );
+            }
+            return false;
+        };
+
+        let gate = Gate::anechoic(run.gate_ms / 1000.0);
+        let Some(gated) = gated_response(&impulse, &gate, run.fft_size) else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("the gate is longer than the impulse response"),
+                );
+            }
+            return false;
+        };
+
+        let decay = schroeder_decay(&impulse);
+        let reverb = reverb_time(&decay, run.sample_rate);
+
+        // The peak is the direct arrival. It carries the converter round trip
+        // as well as the flight time - see AnalyzerMeasureResult::arrival_ms.
+        let peak_index = impulse
+            .samples
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .map_or(0, |(index, _)| index);
+        let arrival_seconds = impulse.time_at(peak_index);
+
+        let result = AnalyzerMeasureResult {
+            arrival_ms: arrival_seconds * 1000.0,
+            arrival_metres: arrival_seconds * SPEED_OF_SOUND,
+            peak_amplitude: impulse.peak_amplitude(),
+            edt: reverb.edt.unwrap_or(0.0),
+            has_edt: reverb.edt.is_some(),
+            t20: reverb.t20.unwrap_or(0.0),
+            has_t20: reverb.t20.is_some(),
+            t30: reverb.t30.unwrap_or(0.0),
+            has_t30: reverb.t30.is_some(),
+            decay_spread: reverb.spread().unwrap_or(0.0),
+            has_decay_spread: reverb.spread().is_some(),
+            resolution_hz: gated.resolution_hz,
+            points: gated.magnitude_db.len(),
+        };
+
+        session.measured = Some(Measured {
+            impulse,
+            magnitude_db: gated.magnitude_db,
+            bin_spacing_hz: gated.bin_spacing_hz,
+            result,
+        });
+
+        if !out.is_null() {
+            unsafe { ptr::write(out, result) };
+        }
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+/// Whether a completed measurement is held.
+///
+/// # Safety
+///
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_has_measurement(session: *const AnalyzerSession) -> bool {
+    if session.is_null() {
+        return false;
+    }
+    guard(false, || unsafe { (*session).measured.is_some() })
+}
+
+/// Read the last measurement's findings.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_measurement_result(
+    session: *const AnalyzerSession,
+    out: *mut AnalyzerMeasureResult,
+) -> bool {
+    if session.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &*session };
+        match &session.measured {
+            Some(measured) => {
+                unsafe { ptr::write(out, measured.result) };
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Copy the measured response, reduced onto the current axis.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_measured(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+        let Some(measured) = &session.measured else {
+            return 0;
+        };
+
+        let columns = session.columns.min(capacity);
+        let spacing = measured.bin_spacing_hz;
+        session.bins.clear();
+        session.bins.extend_from_slice(&measured.magnitude_db);
+
+        reduce(
+            &session.bins,
+            spacing,
+            &session.frequency,
+            columns,
+            session.reduction,
+            &mut session.measured_trace,
+        );
+
+        let written = session.measured_trace.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(session.measured_trace.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+/// Copy the impulse response itself, decimated to `capacity` points.
+///
+/// Values are amplitudes, normalised to the peak, so a caller can draw the
+/// impulse without knowing the recording level.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_impulse(
+    session: *const AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+    seconds: f32,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 || !seconds.is_finite() || seconds <= 0.0
+    {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &*session };
+        let Some(measured) = &session.measured else {
+            return 0;
+        };
+
+        let rate = measured.impulse.sample_rate;
+        let wanted = ((seconds * rate).round() as usize)
+            .min(measured.impulse.samples.len())
+            .max(1);
+        let peak = measured.impulse.peak_amplitude().max(f32::MIN_POSITIVE);
+
+        // Decimate by taking the largest magnitude in each span rather than
+        // every nth sample: an impulse response is mostly near zero, and
+        // sampling it sparsely would miss the peaks that carry the shape.
+        let written = capacity.min(wanted);
+        for slot in 0..written {
+            let from = slot * wanted / written;
+            let to = ((slot + 1) * wanted / written).max(from + 1);
+            let value = measured.impulse.samples[from..to.min(wanted)]
+                .iter()
+                .copied()
+                .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+                .unwrap_or(0.0);
+            // SAFETY: caller guarantees `capacity` writable floats.
+            unsafe { ptr::write(out.add(slot), value / peak) };
+        }
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Spectrogram
+//
+// One column of data per analysis frame, and nothing more. The renderer keeps a
+// ring-buffer texture on the GPU, writes this column into it, and scrolls by
+// advancing a texture coordinate.
+//
+// The core must never composite the image. At a Retina drawable of roughly
+// 2800x1600 that is 18 MB per frame, over 2 GB/s of CPU writes at 120 fps -
+// which would make the CPU the frame rate limit and is a restatement of exactly
+// the problem this project exists to avoid.
+// ---------------------------------------------------------------------------
+
+/// Frequency gridlines for an axis of arbitrary length.
+///
+/// The spectrogram runs frequency up the drawable rather than across it, so it
+/// needs tick positions along a different length from the one the trace plot
+/// declared. This builds a temporary axis over the session's current frequency
+/// range and leaves the session's own geometry untouched, so asking does not
+/// disturb what the trace plot is drawing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `capacity` writable
+/// [`AnalyzerTick`] values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_frequency_ticks_for(
+    session: *const AnalyzerSession,
+    length: f32,
+    out: *mut AnalyzerTick,
+    capacity: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || capacity == 0 || !length.is_finite() || length <= 0.0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &*session };
+        let axis = FrequencyAxis::new(
+            session.frequency.min_hz(),
+            session.frequency.max_hz(),
+            length,
+        );
+        let ticks = axis.ticks();
+        let written = ticks.len().min(capacity);
+        for (index, tick) in ticks.iter().take(written).enumerate() {
+            // SAFETY: caller guarantees `capacity` writable ticks.
+            unsafe {
+                ptr::write(
+                    out.add(index),
+                    AnalyzerTick {
+                        value: tick.value,
+                        position: tick.position,
+                        major: tick.major,
+                    },
+                );
+            }
+        }
+        written
+    })
+}
+
+/// Reduce the newest frame onto `rows` frequency positions.
+///
+/// Values are decibels, not colours: mapping level to colour is the renderer's
+/// job and differs per platform. Returns the number of rows written, which is
+/// zero until something has been analysed.
+///
+/// # Safety
+///
+/// `session` must be null or live. `out` must point to `rows` writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_copy_spectrogram_column(
+    session: *mut AnalyzerSession,
+    out: *mut f32,
+    rows: usize,
+) -> usize {
+    if session.is_null() || out.is_null() || rows == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let session = unsafe { &mut *session };
+
+        // The spectrogram's frequency axis runs up the drawable, so it is sized
+        // by row count rather than by the plot's column count.
+        if (session.spectrogram_axis.width() - rows as f32).abs() > f32::EPSILON
+            || session.spectrogram_axis.min_hz() != session.frequency.min_hz()
+            || session.spectrogram_axis.max_hz() != session.frequency.max_hz()
+        {
+            session.spectrogram_axis = FrequencyAxis::new(
+                session.frequency.min_hz(),
+                session.frequency.max_hz(),
+                rows as f32,
+            );
+        }
+
+        let spacing = {
+            let frame = session.engine.latest();
+            if frame.bins.is_empty() {
+                return 0;
+            }
+            session.bins.clear();
+            session.bins.extend_from_slice(&frame.bins);
+            frame.bin_spacing_hz
+        };
+
+        reduce(
+            &session.bins,
+            spacing,
+            &session.spectrogram_axis,
+            rows,
+            session.reduction,
+            &mut session.spectrogram_column,
+        );
+
+        let written = session.spectrogram_column.points.len().min(rows);
+        // SAFETY: caller guarantees `rows` writable floats, written <= rows.
+        unsafe {
+            ptr::copy_nonoverlapping(session.spectrogram_column.points.as_ptr(), out, written)
+        };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Captured traces
+//
+// The store is a separate handle rather than part of a session, because the
+// whole point of a captured trace is to compare it against something measured
+// later — including after a change that restarts the session. Transform size,
+// window and averaging all restart it, and holding traces inside would mean
+// capturing a "before" curve and then losing it the moment you changed the
+// setting you wanted to compare.
+//
+// Traces are stored as measurements at analysis resolution, not as the pixel
+// columns they were drawn as. Storing the reduced curve would be storing a
+// picture: it would stretch rather than re-reduce when the window resized, and
+// a trace captured at one axis range would be wrong at any other.
+// ---------------------------------------------------------------------------
+
+/// How a captured trace is drawn.
+#[derive(Debug, Clone, Copy)]
+struct CapturedTrace {
+    id: MeasurementId,
+    visible: bool,
+    /// Index into a palette the platform layer owns. The core does not know
+    /// what colour this is, only that two traces should not share one.
+    colour: u32,
+}
+
+/// Captured curves, held independently of any session.
+pub struct AnalyzerTraceStore {
+    measurements: MeasurementStore,
+    display: Vec<CapturedTrace>,
+    /// Next palette index to hand out. Monotonic, so two traces captured either
+    /// side of a deletion do not end up the same colour.
+    next_colour: u32,
+    /// Scratch for reduction, reused so drawing does not allocate per frame.
+    reduced: Trace,
+    bins: Vec<f32>,
+}
+
+impl std::fmt::Debug for AnalyzerTraceStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnalyzerTraceStore")
+            .field("count", &self.display.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Longest trace name carried across the boundary, including the terminator.
+pub const ANALYZER_TRACE_NAME_LEN: usize = 128;
+
+/// A captured trace, as the UI sees it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerTraceInfo {
+    /// NUL-terminated name.
+    pub name: [c_char; ANALYZER_TRACE_NAME_LEN],
+    /// Whether it is drawn.
+    pub visible: bool,
+    /// Palette index chosen when it was captured.
+    pub colour: u32,
+    /// Points stored, at analysis resolution.
+    pub points: usize,
+    /// Rate it was captured at.
+    pub sample_rate: f32,
+    /// Spacing between stored bins, in hertz.
+    pub bin_spacing_hz: f32,
+}
+
+impl Default for AnalyzerTraceInfo {
+    fn default() -> Self {
+        Self {
+            name: [0; ANALYZER_TRACE_NAME_LEN],
+            visible: false,
+            colour: 0,
+            points: 0,
+            sample_rate: 0.0,
+            bin_spacing_hz: 0.0,
+        }
+    }
+}
+
+/// Create a trace store. Outlives any session; destroy it with
+/// [`analyzer_trace_store_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_trace_store_create() -> *mut AnalyzerTraceStore {
+    Box::into_raw(Box::new(AnalyzerTraceStore {
+        measurements: MeasurementStore::new(),
+        display: Vec::new(),
+        next_colour: 0,
+        reduced: Trace::default(),
+        bins: Vec::new(),
+    }))
+}
+
+/// Release a trace store. Safe to call with null.
+///
+/// # Safety
+///
+/// `store` must come from [`analyzer_trace_store_create`] and not already be
+/// destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_destroy(store: *mut AnalyzerTraceStore) {
+    if store.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(store) });
+}
+
+/// Capture the session's live curve into the store.
+///
+/// Returns its index, or -1 when there is nothing analysed yet. `name` may be
+/// null, in which case a unique one is generated.
+///
+/// # Safety
+///
+/// `store` and `session` must be null or live. `name` must be null or a
+/// NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_capture(
+    store: *mut AnalyzerTraceStore,
+    session: *mut AnalyzerSession,
+    name: *const c_char,
+) -> isize {
+    if store.is_null() || session.is_null() {
+        return -1;
+    }
+    guard(-1, || {
+        let store = unsafe { &mut *store };
+        let session = unsafe { &mut *session };
+
+        let (magnitude_db, bin_spacing_hz, sample_rate) = {
+            let frame = session.engine.latest();
+            (
+                frame
+                    .bins
+                    .iter()
+                    .map(|db| f64::from(*db))
+                    .collect::<Vec<f64>>(),
+                f64::from(frame.bin_spacing_hz),
+                f64::from(frame.sample_rate),
+            )
+        };
+        if magnitude_db.is_empty() {
+            return -1;
+        }
+
+        let requested = if name.is_null() {
+            None
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(name) }
+                .to_str()
+                .ok()
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let label = store
+            .measurements
+            .unique_name(requested.as_deref().unwrap_or("Trace"));
+
+        let measurement = Measurement::new(
+            MeasurementId(0),
+            label,
+            sample_rate,
+            MeasurementData::PowerSpectrum {
+                magnitude_db,
+                bin_spacing_hz,
+            },
+        );
+
+        let id = store.measurements.add(measurement);
+        let colour = store.next_colour;
+        store.next_colour = store.next_colour.wrapping_add(1);
+        store.display.push(CapturedTrace {
+            id,
+            visible: true,
+            colour,
+        });
+        (store.display.len() - 1) as isize
+    })
+}
+
+/// How many traces are held.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_count(store: *const AnalyzerTraceStore) -> usize {
+    if store.is_null() {
+        return 0;
+    }
+    guard(0, || unsafe { (*store).display.len() })
+}
+
+/// Describe one trace.
+///
+/// # Safety
+///
+/// `store` must be null or live. `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_info(
+    store: *const AnalyzerTraceStore,
+    index: usize,
+    out: *mut AnalyzerTraceInfo,
+) -> bool {
+    if store.is_null() || out.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &*store };
+        let Some(display) = store.display.get(index) else {
+            return false;
+        };
+        let Some(measurement) = store.measurements.get(display.id) else {
+            return false;
+        };
+
+        let mut info = AnalyzerTraceInfo {
+            visible: display.visible,
+            colour: display.colour,
+            points: measurement.data.len(),
+            sample_rate: measurement.sample_rate as f32,
+            bin_spacing_hz: measurement.data.bin_spacing_hz().unwrap_or(0.0) as f32,
+            ..AnalyzerTraceInfo::default()
+        };
+        write_c_string(&mut info.name, &measurement.name);
+        unsafe { ptr::write(out, info) };
+        true
+    })
+}
+
+/// Show or hide a trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_set_visible(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+    visible: bool,
+) -> bool {
+    if store.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &mut *store };
+        match store.display.get_mut(index) {
+            Some(display) => {
+                display.visible = visible;
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Forget a trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_remove(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+) -> bool {
+    if store.is_null() {
+        return false;
+    }
+    guard(false, || {
+        let store = unsafe { &mut *store };
+        if index >= store.display.len() {
+            return false;
+        }
+        let display = store.display.remove(index);
+        store.measurements.remove(display.id);
+        true
+    })
+}
+
+/// Forget every trace.
+///
+/// # Safety
+///
+/// `store` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_clear(store: *mut AnalyzerTraceStore) {
+    if store.is_null() {
+        return;
+    }
+    guard((), || {
+        let store = unsafe { &mut *store };
+        store.display.clear();
+        store.measurements.clear();
+    })
+}
+
+/// Copy a captured trace, reduced onto the session's current axis.
+///
+/// The session supplies only the geometry. A trace captured at one transform
+/// size draws correctly against a session running at another, which is the
+/// point of storing it at analysis resolution.
+///
+/// # Safety
+///
+/// `store` and `session` must be null or live. `out` must point to `capacity`
+/// writable floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_trace_store_copy(
+    store: *mut AnalyzerTraceStore,
+    index: usize,
+    session: *const AnalyzerSession,
+    out: *mut f32,
+    capacity: usize,
+) -> usize {
+    if store.is_null() || session.is_null() || out.is_null() || capacity == 0 {
+        return 0;
+    }
+    guard(0, || {
+        let store = unsafe { &mut *store };
+        let session = unsafe { &*session };
+
+        let Some(display) = store.display.get(index).copied() else {
+            return 0;
+        };
+        let Some(measurement) = store.measurements.get(display.id) else {
+            return 0;
+        };
+        let Some(levels) = measurement.data.magnitude_db() else {
+            return 0;
+        };
+        let Some(spacing) = measurement.data.bin_spacing_hz() else {
+            return 0;
+        };
+
+        store.bins.clear();
+        store.bins.extend(levels.iter().map(|db| *db as f32));
+
+        let columns = session.columns.min(capacity);
+        reduce(
+            &store.bins,
+            spacing as f32,
+            &session.frequency,
+            columns,
+            session.reduction,
+            &mut store.reduced,
+        );
+
+        let written = store.reduced.points.len().min(capacity);
+        // SAFETY: caller guarantees `capacity` writable floats, written <= capacity.
+        unsafe { ptr::copy_nonoverlapping(store.reduced.points.as_ptr(), out, written) };
+        written
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Automatic equalisation
+// ---------------------------------------------------------------------------
+
+/// How the automatic fit is constrained.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerOptimiserConfig {
+    /// Most filters to produce.
+    pub max_filters: u32,
+    /// Low end of the corrected band, in hertz.
+    pub from_hz: f32,
+    /// High end of the corrected band, in hertz.
+    pub to_hz: f32,
+    /// Largest boost any one filter may apply.
+    ///
+    /// Deliberately much smaller than the cut limit by default: a dip in a room
+    /// measurement is usually a cancellation, and boosting one burns headroom
+    /// without filling it in.
+    pub max_boost_db: f32,
+    /// Largest cut any one filter may apply.
+    pub max_cut_db: f32,
+    /// Widest filter allowed.
+    pub min_q: f32,
+    /// Narrowest filter allowed.
+    pub max_q: f32,
+    /// Errors smaller than this are left alone.
+    pub threshold_db: f32,
+}
+
+impl From<AnalyzerOptimiserConfig> for OptimiserConfig {
+    fn from(value: AnalyzerOptimiserConfig) -> Self {
+        Self {
+            max_filters: value.max_filters as usize,
+            from_hz: value.from_hz,
+            to_hz: value.to_hz,
+            max_boost_db: value.max_boost_db,
+            max_cut_db: value.max_cut_db,
+            min_q: value.min_q,
+            max_q: value.max_q,
+            threshold_db: value.threshold_db,
+            // Set by the session, which is the only thing that knows the rate.
+            sample_rate: 48_000.0,
+        }
+    }
+}
+
+/// What a fit produced.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzerOptimisation {
+    /// Filters placed.
+    pub band_count: u32,
+    /// RMS error across the corrected band before any filter.
+    pub initial_error_db: f32,
+    /// RMS error after every filter.
+    pub final_error_db: f32,
+}
+
+/// The fit constraints a fresh session starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_optimiser_config_default() -> AnalyzerOptimiserConfig {
+    let defaults = OptimiserConfig::default();
+    AnalyzerOptimiserConfig {
+        max_filters: defaults.max_filters as u32,
+        from_hz: defaults.from_hz,
+        to_hz: defaults.to_hz,
+        max_boost_db: defaults.max_boost_db,
+        max_cut_db: defaults.max_cut_db,
+        min_q: defaults.min_q,
+        max_q: defaults.max_q,
+        threshold_db: defaults.threshold_db,
+    }
+}
+
+/// Fit filters to the gap between the measurement and the target.
+///
+/// The result **replaces** the parametric equaliser's bands and selects it, so
+/// the fit is immediately drawn and heard. Replacing rather than appending is
+/// deliberate: running the fit twice should give the same answer as running it
+/// once, and appending would instead correct the correction.
+///
+/// # Safety
+///
+/// `session` must be null or live. `config` must be readable. `out` must be
+/// null or writable. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_optimise(
+    session: *mut AnalyzerSession,
+    config: *const AnalyzerOptimiserConfig,
+    out: *mut AnalyzerOptimisation,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || config.is_null() {
+        unsafe {
+            set_status(
+                status,
+                AnalyzerStatus::failure("null session or configuration"),
+            )
+        };
+        return false;
+    }
+    guard(false, || {
+        let session = unsafe { &mut *session };
+        let mut settings: OptimiserConfig = unsafe { *config }.into();
+        settings.sample_rate = session.parametric.sample_rate();
+
+        let Some((frequencies, levels)) = session.measured_at_columns() else {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure("nothing has been captured yet to correct"),
+                );
+            }
+            return false;
+        };
+
+        // A target sitting at the wrong absolute level would make every error
+        // the fit sees a constant offset, and it would spend its filters on
+        // that rather than on the room.
+        session
+            .target
+            .align_to(&frequencies, &levels, ALIGN_FROM_HZ, ALIGN_TO_HZ);
+
+        let result = analyzer_dsp::optimise(&frequencies, &levels, &session.target, &settings);
+
+        session.parametric.set_bands(result.bands.clone());
+        session.eq_mode = AnalyzerEqMode::Parametric;
+        session.publish_eq();
+
+        if !out.is_null() {
+            unsafe {
+                ptr::write(
+                    out,
+                    AnalyzerOptimisation {
+                        band_count: result.bands.len() as u32,
+                        initial_error_db: result.initial_error_db,
+                        final_error_db: result.final_error_db,
+                    },
+                );
+            }
+        }
+        unsafe { set_status(status, AnalyzerStatus::ok()) };
+        true
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Filter export
+// ---------------------------------------------------------------------------
+
+/// A format the equaliser can be written as.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzerFilterFormat {
+    /// REW's own filter settings text.
+    Rew = 0,
+    /// An Equalizer APO configuration.
+    EqualizerApo = 1,
+    /// miniDSP biquad coefficients.
+    MiniDsp = 2,
+}
+
+impl From<AnalyzerFilterFormat> for FilterFormat {
+    fn from(value: AnalyzerFilterFormat) -> Self {
+        match value {
+            AnalyzerFilterFormat::Rew => FilterFormat::Rew,
+            AnalyzerFilterFormat::EqualizerApo => FilterFormat::EqualizerApo,
+            AnalyzerFilterFormat::MiniDsp => FilterFormat::MiniDsp,
+        }
+    }
+}
+
+/// Write the active equaliser to `path` in `format`.
+///
+/// Fails when no equaliser is active, rather than writing an empty file that
+/// looks like a successful export of nothing.
+///
+/// # Safety
+///
+/// `session` must be null or live. `path` must be a NUL-terminated C string.
+/// `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_session_export_filters(
+    session: *const AnalyzerSession,
+    format: AnalyzerFilterFormat,
+    path: *const c_char,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if session.is_null() || path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null session or path")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        let Some(eq) = unsafe { &*session }.equaliser() else {
+            unsafe { set_status(status, AnalyzerStatus::failure("no equaliser is active")) };
+            return false;
+        };
+
+        let text = analyzer_model::filter_export::to_text(
+            format.into(),
+            eq.bands(),
+            eq.preamp_db(),
+            eq.sample_rate(),
+        );
+
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+//
+// Preferences live in the core rather than in the platform's own defaults
+// store, so their validation and their file format are written once. The
+// platform supplies only the location - which directory a preferences file
+// belongs in is genuinely a platform question, and the one part of this that
+// Windows and Linux will answer differently.
+// ---------------------------------------------------------------------------
+
+/// Longest path [`AnalyzerSettings`] can carry, including the terminator.
+pub const ANALYZER_PATH_LEN: usize = 1024;
+
+/// Program settings, as a flat POD struct.
+///
+/// The optional SPL offset is split into a flag and a value rather than using a
+/// sentinel, because every sentinel worth choosing is a level someone could
+/// legitimately measure.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzerSettings {
+    /// Transform size a new session starts with.
+    pub fft_size: u32,
+    /// Window a new session starts with.
+    pub window: AnalyzerWindow,
+    /// Averaging a new session starts with.
+    pub averaging: AnalyzerAveraging,
+    /// Whether to start capturing as soon as the window opens.
+    pub start_on_launch: bool,
+    /// Low end of the frequency axis, in hertz.
+    pub min_hz: f32,
+    /// High end of the frequency axis, in hertz.
+    pub max_hz: f32,
+    /// Bottom of the level axis, in decibels.
+    pub min_db: f32,
+    /// Top of the level axis, in decibels.
+    pub max_db: f32,
+    /// Spacing of the horizontal gridlines, in decibels.
+    pub level_grid_step: f32,
+    /// Whether an SPL calibration has ever been measured.
+    pub has_spl_offset: bool,
+    /// Offset from dBFS to dB SPL. Meaningless unless `has_spl_offset`.
+    pub spl_offset_db: f32,
+    /// NUL-terminated path to a microphone correction file. Empty for none.
+    pub mic_cal_path: [c_char; ANALYZER_PATH_LEN],
+}
+
+/// Copy a string into a fixed NUL-terminated buffer, truncating on a character
+/// boundary so the result stays valid UTF-8.
+fn write_c_string(dest: &mut [c_char], text: &str) {
+    dest.fill(0);
+    let Some(capacity) = dest.len().checked_sub(1) else {
+        return;
+    };
+    let mut end = text.len().min(capacity);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    for (slot, byte) in dest.iter_mut().zip(text.as_bytes().iter().take(end)) {
+        *slot = *byte as c_char;
+    }
+}
+
+/// Read a fixed NUL-terminated buffer back into a string.
+fn read_c_string(source: &[c_char]) -> String {
+    let bytes: Vec<u8> = source
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+impl From<&Settings> for AnalyzerSettings {
+    fn from(value: &Settings) -> Self {
+        let mut out = Self {
+            fft_size: value.fft_size,
+            window: match value.window {
+                WindowChoice::Rectangular => AnalyzerWindow::Rectangular,
+                WindowChoice::Hann => AnalyzerWindow::Hann,
+                WindowChoice::BlackmanHarris => AnalyzerWindow::BlackmanHarris,
+                WindowChoice::FlatTop => AnalyzerWindow::FlatTop,
+            },
+            averaging: match value.averaging {
+                AveragingChoice::None => AnalyzerAveraging::None,
+                AveragingChoice::Fast => AnalyzerAveraging::Fast,
+                AveragingChoice::Infinite => AnalyzerAveraging::Infinite,
+                AveragingChoice::PeakHold => AnalyzerAveraging::PeakHold,
+            },
+            start_on_launch: value.start_on_launch,
+            min_hz: value.min_hz,
+            max_hz: value.max_hz,
+            min_db: value.min_db,
+            max_db: value.max_db,
+            level_grid_step: value.level_grid_step,
+            has_spl_offset: value.spl_offset_db.is_some(),
+            spl_offset_db: value.spl_offset_db.unwrap_or(0.0),
+            mic_cal_path: [0; ANALYZER_PATH_LEN],
+        };
+        write_c_string(
+            &mut out.mic_cal_path,
+            value.mic_cal_path.as_deref().unwrap_or(""),
+        );
+        out
+    }
+}
+
+impl From<&AnalyzerSettings> for Settings {
+    fn from(value: &AnalyzerSettings) -> Self {
+        let path = read_c_string(&value.mic_cal_path);
+        Settings {
+            fft_size: value.fft_size,
+            window: match value.window {
+                AnalyzerWindow::Rectangular => WindowChoice::Rectangular,
+                AnalyzerWindow::BlackmanHarris => WindowChoice::BlackmanHarris,
+                AnalyzerWindow::FlatTop => WindowChoice::FlatTop,
+                // A Tukey window is a shape the DSP has and the preferences
+                // vocabulary does not; it degrades to the default rather than
+                // being stored as something that cannot be read back.
+                AnalyzerWindow::Hann | AnalyzerWindow::Tukey => WindowChoice::Hann,
+            },
+            averaging: match value.averaging {
+                AnalyzerAveraging::None => AveragingChoice::None,
+                AnalyzerAveraging::Fast => AveragingChoice::Fast,
+                AnalyzerAveraging::Infinite => AveragingChoice::Infinite,
+                AnalyzerAveraging::PeakHold => AveragingChoice::PeakHold,
+            },
+            start_on_launch: value.start_on_launch,
+            min_hz: value.min_hz,
+            max_hz: value.max_hz,
+            min_db: value.min_db,
+            max_db: value.max_db,
+            level_grid_step: value.level_grid_step,
+            spl_offset_db: value.has_spl_offset.then_some(value.spl_offset_db),
+            mic_cal_path: (!path.is_empty()).then_some(path),
+        }
+        .validated()
+    }
+}
+
+/// The settings a fresh install starts with.
+#[unsafe(no_mangle)]
+pub extern "C" fn analyzer_settings_default() -> AnalyzerSettings {
+    AnalyzerSettings::from(&Settings::default())
+}
+
+/// Read settings from `path`.
+///
+/// A file that does not exist is not a failure: it is the first launch, and the
+/// defaults are written through with a success status. Anything else - an
+/// unreadable directory, a permissions problem - is reported, because silently
+/// starting from defaults there would look identical to the settings having been
+/// lost.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string. `out` must point to a writable
+/// [`AnalyzerSettings`]. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_settings_load(
+    path: *const c_char,
+    out: *mut AnalyzerSettings,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if path.is_null() || out.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null path or destination")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text,
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                unsafe { ptr::write(out, AnalyzerSettings::from(&Settings::from_text(&text))) };
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                unsafe { ptr::write(out, analyzer_settings_default()) };
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe { ptr::write(out, analyzer_settings_default()) };
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("reading {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
+/// Write settings to `path`, creating the containing directory if needed.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string. `settings` must point to a readable
+/// [`AnalyzerSettings`]. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_settings_save(
+    path: *const c_char,
+    settings: *const AnalyzerSettings,
+    status: *mut AnalyzerStatus,
+) -> bool {
+    if path.is_null() || settings.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null path or settings")) };
+        return false;
+    }
+    guard(false, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return false;
+            }
+        };
+        let settings = Settings::from(unsafe { &*settings });
+
+        if let Some(parent) = std::path::Path::new(&path).parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            unsafe {
+                set_status(
+                    status,
+                    AnalyzerStatus::failure(&format!("creating {}: {error}", parent.display())),
+                );
+            }
+            return false;
+        }
+
+        match std::fs::write(&path, settings.to_text()) {
+            Ok(()) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                true
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                false
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -2834,5 +4708,397 @@ mod tests {
         );
         assert_eq!(align_of::<AnalyzerStatus>(), 4);
         assert!(size_of::<AnalyzerFrameInfo>() >= 24);
+    }
+
+    // ------------------------------------------------------------ target --
+
+    #[test]
+    fn target_calls_tolerate_null_handles() {
+        let mut target = analyzer_target_default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe { analyzer_session_target(ptr::null(), &mut target) });
+        assert!(!unsafe { analyzer_session_set_target(ptr::null_mut(), &target) });
+        assert!(!unsafe { analyzer_session_align_target(ptr::null_mut()) });
+        assert_eq!(
+            unsafe { analyzer_session_copy_target(ptr::null_mut(), ptr::null_mut(), 0) },
+            0
+        );
+        assert!(!unsafe {
+            analyzer_session_load_target(ptr::null_mut(), ptr::null(), &mut status)
+        });
+        assert_ne!(status.code, 0);
+    }
+
+    // ------------------------------------------------------- measurement --
+
+    #[test]
+    fn measurement_calls_tolerate_null_handles() {
+        let config = analyzer_measure_config_default();
+        let mut progress = AnalyzerMeasureProgress::default();
+        let mut result = AnalyzerMeasureResult::default();
+        let mut status = AnalyzerStatus::default();
+
+        assert!(!unsafe {
+            analyzer_session_start_measurement(ptr::null_mut(), &config, &mut status)
+        });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe { analyzer_session_measure_progress(ptr::null(), &mut progress) });
+        assert!(!unsafe {
+            analyzer_session_finish_measurement(ptr::null_mut(), &mut result, &mut status)
+        });
+        unsafe { analyzer_session_cancel_measurement(ptr::null_mut()) };
+        assert!(!unsafe { analyzer_session_has_measurement(ptr::null()) });
+        assert!(!unsafe { analyzer_session_measurement_result(ptr::null(), &mut result) });
+        assert_eq!(
+            unsafe { analyzer_session_copy_measured(ptr::null_mut(), ptr::null_mut(), 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { analyzer_session_copy_impulse(ptr::null(), ptr::null_mut(), 0, 0.05) },
+            0
+        );
+    }
+
+    /// The sweep defaults must not be loud. A measurement stimulus that starts
+    /// at full scale is one that damages something.
+    #[test]
+    fn the_default_sweep_is_well_below_full_scale() {
+        let config = analyzer_measure_config_default();
+        assert!(config.level_db <= -6.0, "{}", config.level_db);
+        assert!(config.end_hz > config.start_hz);
+        assert!(config.seconds > 0.0);
+        assert!(
+            config.tail_seconds > 0.0,
+            "no tail leaves no decay to measure"
+        );
+    }
+
+    /// A sweep must be one pass. A repeating one would overlap its own tail and
+    /// deconvolve into an impulse response with a second arrival in it.
+    #[test]
+    fn an_armed_sweep_does_not_repeat() {
+        let state = SignalState::default();
+        state.set_sweep(20.0, 20_000.0, 2.0, -12.0);
+        match state.signal() {
+            Signal::Sweep {
+                start_hz,
+                end_hz,
+                seconds,
+                repeat,
+                ..
+            } => {
+                assert!((start_hz - 20.0).abs() < 1e-3);
+                assert!((end_hz - 20_000.0).abs() < 1e-3);
+                assert!((seconds - 2.0).abs() < 1e-6);
+                assert!(!repeat, "a measurement sweep must be a single pass");
+            }
+            other => panic!("expected a sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_degenerate_impulse_window_is_refused() {
+        let mut scratch = [0.0f32; 8];
+        for seconds in [0.0, -1.0, f32::NAN] {
+            assert_eq!(
+                unsafe {
+                    analyzer_session_copy_impulse(ptr::null(), scratch.as_mut_ptr(), 8, seconds)
+                },
+                0
+            );
+        }
+    }
+
+    // ------------------------------------------------------- spectrogram --
+
+    #[test]
+    fn spectrogram_calls_tolerate_null_handles() {
+        let mut scratch = [0.0f32; 8];
+        assert_eq!(
+            unsafe {
+                analyzer_session_copy_spectrogram_column(ptr::null_mut(), scratch.as_mut_ptr(), 8)
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                analyzer_session_copy_spectrogram_column(ptr::null_mut(), ptr::null_mut(), 0)
+            },
+            0
+        );
+
+        let mut ticks = [AnalyzerTick::default(); 8];
+        assert_eq!(
+            unsafe { analyzer_frequency_ticks_for(ptr::null(), 100.0, ticks.as_mut_ptr(), 8) },
+            0
+        );
+    }
+
+    /// A zero or non-finite axis length would divide by zero inside the axis;
+    /// refusing it here is cheaper than checking at every use.
+    #[test]
+    fn a_degenerate_axis_length_is_refused() {
+        let mut ticks = [AnalyzerTick::default(); 8];
+        for length in [0.0, -10.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                unsafe { analyzer_frequency_ticks_for(ptr::null(), length, ticks.as_mut_ptr(), 8) },
+                0
+            );
+        }
+    }
+
+    // ------------------------------------------------------------ traces --
+
+    #[test]
+    fn trace_calls_tolerate_null_handles() {
+        let mut info = AnalyzerTraceInfo::default();
+        assert_eq!(
+            unsafe { analyzer_trace_store_capture(ptr::null_mut(), ptr::null_mut(), ptr::null()) },
+            -1
+        );
+        assert_eq!(unsafe { analyzer_trace_store_count(ptr::null()) }, 0);
+        assert!(!unsafe { analyzer_trace_store_info(ptr::null(), 0, &mut info) });
+        assert!(!unsafe { analyzer_trace_store_set_visible(ptr::null_mut(), 0, true) });
+        assert!(!unsafe { analyzer_trace_store_remove(ptr::null_mut(), 0) });
+        unsafe { analyzer_trace_store_clear(ptr::null_mut()) };
+        unsafe { analyzer_trace_store_destroy(ptr::null_mut()) };
+        assert_eq!(
+            unsafe {
+                analyzer_trace_store_copy(ptr::null_mut(), 0, ptr::null(), ptr::null_mut(), 0)
+            },
+            0
+        );
+    }
+
+    /// The store has its own lifetime precisely so it can be exercised without
+    /// a device, and so a trace survives the session that captured it.
+    #[test]
+    fn an_empty_store_reports_empty_and_refuses_bad_indices() {
+        let store = analyzer_trace_store_create();
+        assert!(!store.is_null());
+
+        let mut info = AnalyzerTraceInfo::default();
+        assert_eq!(unsafe { analyzer_trace_store_count(store) }, 0);
+        assert!(!unsafe { analyzer_trace_store_info(store, 0, &mut info) });
+        assert!(!unsafe { analyzer_trace_store_set_visible(store, 3, true) });
+        assert!(!unsafe { analyzer_trace_store_remove(store, 3) });
+        unsafe { analyzer_trace_store_clear(store) };
+
+        // Capturing needs a session; without one there is nothing to store.
+        assert_eq!(
+            unsafe { analyzer_trace_store_capture(store, ptr::null_mut(), ptr::null()) },
+            -1
+        );
+
+        unsafe { analyzer_trace_store_destroy(store) };
+    }
+
+    /// Trace names cross the boundary in an inline buffer, so a long one must
+    /// truncate on a character boundary rather than corrupt the string.
+    #[test]
+    fn a_long_trace_name_truncates_safely() {
+        let mut info = AnalyzerTraceInfo::default();
+        write_c_string(&mut info.name, &"é".repeat(200));
+        let read = read_c_string(&info.name);
+        assert!(read.chars().all(|c| c == 'é'), "got {read:?}");
+        assert!(read.len() < ANALYZER_TRACE_NAME_LEN);
+    }
+
+    // --------------------------------------------------------- optimiser --
+
+    #[test]
+    fn optimising_without_a_session_reports_rather_than_crashes() {
+        let config = analyzer_optimiser_config_default();
+        let mut result = AnalyzerOptimisation::default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe {
+            analyzer_session_optimise(ptr::null_mut(), &config, &mut result, &mut status)
+        });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe {
+            analyzer_session_optimise(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        });
+    }
+
+    /// The defaults encode the rule that matters: boosting a null burns
+    /// headroom without filling it, so boost is capped far below cut.
+    #[test]
+    fn the_default_fit_caps_boost_well_below_cut() {
+        let config = analyzer_optimiser_config_default();
+        assert!(config.max_boost_db < config.max_cut_db);
+        assert!(config.max_filters > 0);
+        assert!(config.to_hz > config.from_hz);
+        assert!(config.max_q > config.min_q);
+    }
+
+    #[test]
+    fn target_shape_codes_are_stable() {
+        assert_eq!(AnalyzerTargetShape::Flat as u32, 0);
+        assert_eq!(AnalyzerTargetShape::Tilt as u32, 1);
+        assert_eq!(AnalyzerTargetShape::Room as u32, 2);
+        assert_eq!(AnalyzerTargetShape::Custom as u32, 3);
+    }
+
+    /// The room parameters travel with every target, so switching to flat and
+    /// back does not reset what was dialled in.
+    #[test]
+    fn the_default_target_carries_usable_room_parameters() {
+        let target = analyzer_target_default();
+        assert_eq!(target.shape, AnalyzerTargetShape::Flat);
+        assert!(target.shelf_db > 0.0);
+        assert!(target.transition_hz > 0.0);
+        assert!(!target.has_custom);
+    }
+
+    /// Exporting with no equaliser running must say so rather than leave an
+    /// empty file that looks like a successful export of nothing.
+    #[test]
+    fn exporting_filters_without_a_session_reports_rather_than_writes() {
+        let path = std::env::temp_dir().join("analyzer-ffi-no-session.txt");
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe {
+            analyzer_session_export_filters(
+                ptr::null(),
+                AnalyzerFilterFormat::Rew,
+                c.as_ptr(),
+                &mut status,
+            )
+        });
+        assert_ne!(status.code, 0);
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn filter_format_codes_are_stable() {
+        assert_eq!(AnalyzerFilterFormat::Rew as u32, 0);
+        assert_eq!(AnalyzerFilterFormat::EqualizerApo as u32, 1);
+        assert_eq!(AnalyzerFilterFormat::MiniDsp as u32, 2);
+        assert_eq!(
+            FilterFormat::from(AnalyzerFilterFormat::MiniDsp),
+            FilterFormat::MiniDsp
+        );
+    }
+
+    // ----------------------------------------------------------- settings --
+
+    /// A path built from the test name, so parallel tests cannot collide.
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("analyzer-ffi-{name}.cfg"))
+    }
+
+    fn c_path(path: &std::path::Path) -> std::ffi::CString {
+        std::ffi::CString::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_through_the_boundary() {
+        let mut settings = analyzer_settings_default();
+        settings.fft_size = 16384;
+        settings.window = AnalyzerWindow::FlatTop;
+        settings.averaging = AnalyzerAveraging::Infinite;
+        settings.has_spl_offset = true;
+        settings.spl_offset_db = 94.5;
+        write_c_string(&mut settings.mic_cal_path, "/tmp/mic.frd");
+
+        let path = scratch_path("round-trip");
+        let c = c_path(&path);
+        let mut status = AnalyzerStatus::default();
+        assert!(unsafe { analyzer_settings_save(c.as_ptr(), &settings, &mut status) });
+        assert_eq!(status.code, 0);
+
+        let mut loaded = analyzer_settings_default();
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert_eq!(loaded.fft_size, 16384);
+        assert_eq!(loaded.window, AnalyzerWindow::FlatTop);
+        assert_eq!(loaded.averaging, AnalyzerAveraging::Infinite);
+        assert!(loaded.has_spl_offset);
+        assert!((loaded.spl_offset_db - 94.5).abs() < 1e-6);
+        assert_eq!(read_c_string(&loaded.mic_cal_path), "/tmp/mic.frd");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// First launch. A missing file is the normal case, not an error, and
+    /// reporting it as one would train the UI to ignore the status.
+    #[test]
+    fn a_missing_settings_file_loads_defaults_and_succeeds() {
+        let path = scratch_path("absent");
+        let _ = std::fs::remove_file(&path);
+        let c = c_path(&path);
+
+        let mut status = AnalyzerStatus::failure("clobber me");
+        let mut loaded = AnalyzerSettings::from(&Settings {
+            fft_size: 1024,
+            ..Settings::default()
+        });
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert_eq!(status.code, 0);
+        assert_eq!(loaded.fft_size, Settings::default().fft_size);
+    }
+
+    /// The flag exists so that "never calibrated" cannot be confused with a
+    /// calibration that came out at zero.
+    #[test]
+    fn an_unmeasured_spl_offset_stays_unmeasured_across_the_boundary() {
+        let defaults = analyzer_settings_default();
+        assert!(!defaults.has_spl_offset);
+        assert_eq!(Settings::from(&defaults).spl_offset_db, None);
+
+        let mut measured = defaults;
+        measured.has_spl_offset = true;
+        measured.spl_offset_db = 0.0;
+        assert_eq!(Settings::from(&measured).spl_offset_db, Some(0.0));
+    }
+
+    /// A hand-edited file must not be able to hand the axis code a zero span.
+    #[test]
+    fn a_corrupt_settings_file_loads_as_something_usable() {
+        let path = scratch_path("corrupt");
+        std::fs::write(&path, "min_hz: 0\nmax_hz: 0\nfft_size: 7\n").unwrap();
+        let c = c_path(&path);
+
+        let mut status = AnalyzerStatus::default();
+        let mut loaded = analyzer_settings_default();
+        assert!(unsafe { analyzer_settings_load(c.as_ptr(), &mut loaded, &mut status) });
+        assert!(loaded.min_hz > 0.0);
+        assert!(loaded.max_hz > loaded.min_hz);
+        assert_eq!(loaded.fft_size, Settings::default().fft_size);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_calls_tolerate_null_pointers() {
+        let mut settings = analyzer_settings_default();
+        let mut status = AnalyzerStatus::default();
+        assert!(!unsafe { analyzer_settings_load(ptr::null(), &mut settings, &mut status) });
+        assert_ne!(status.code, 0);
+        assert!(!unsafe { analyzer_settings_save(ptr::null(), &settings, &mut status) });
+        assert_ne!(status.code, 0);
+
+        let c = c_path(&scratch_path("null"));
+        assert!(!unsafe { analyzer_settings_load(c.as_ptr(), ptr::null_mut(), &mut status) });
+        assert!(!unsafe { analyzer_settings_save(c.as_ptr(), ptr::null(), &mut status) });
+        // A null status pointer is legal and must not be written through.
+        assert!(!unsafe { analyzer_settings_save(ptr::null(), ptr::null(), ptr::null_mut()) });
+    }
+
+    /// Truncation must land on a character boundary or the buffer stops being
+    /// valid UTF-8 and the path reads back as replacement characters.
+    #[test]
+    fn an_overlong_path_truncates_without_splitting_a_character() {
+        let mut buffer = [0 as c_char; 8];
+        write_c_string(&mut buffer, "ééééééé");
+        let read = read_c_string(&buffer);
+        assert!(read.chars().all(|c| c == 'é'), "got {read:?}");
+        assert!(read.len() <= 7);
     }
 }

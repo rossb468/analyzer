@@ -12,6 +12,8 @@
 
 mod bench;
 mod live;
+#[cfg(target_os = "macos")]
+mod live_coreaudio;
 mod measure;
 mod report;
 

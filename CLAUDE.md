@@ -37,13 +37,12 @@ broken commits shipped before it was fixed.
 ## Layout
 
 ```
-crates/analyzer-dsp/     fft, windows, spectrum, generator, transfer function,
-                         delay, meters, octave bands, mtw, deconvolution,
-                         impulse response, distortion, biquad, eq
+crates/analyzer-dsp/     the maths. No I/O, no OS deps.
 crates/analyzer-cal/     calibration chain, dBFS to absolute dB SPL
 crates/analyzer-audio/   AudioBackend trait + CoreAudio implementation
 crates/analyzer-engine/  RT graph, lock-free ring, snapshot publication
-crates/analyzer-model/   measurements, versioned format, REW text export
+crates/analyzer-model/   measurements, versioned format, REW text export,
+                         filter export, program settings
 crates/analyzer-plot/    display reduction + axis transforms. Emits no pixels.
 crates/analyzer-ffi/     staticlib, C ABI, cbindgen-generated header
 apps/macos/Sources/      Swift + SwiftUI shell, Metal renderer
@@ -125,6 +124,18 @@ Each of these cost real time. Most now have a guard or a regression test.
   Otherwise Swift sees two candidates for every enum.
 - **`build.sh` targets bash 3.2 under `set -u`.** Empty arrays explode; it uses
   plain strings.
+- **Tick positions come back in drawable pixels, not points.** Placing a
+  SwiftUI label at one directly puts it at double its position on any Retina
+  display. `AnalyzerModel.plotScale` carries the ratio.
+- **miniDSP negates the biquad feedback coefficients.** Its difference equation
+  adds the terms the standard form subtracts. Exporting without flipping `a1`
+  and `a2` yields an unstable filter, and the file looks correct.
+- **Captured traces must outlive the session.** Transform size, window and
+  averaging all restart it; a trace store inside the session loses the "before"
+  curve exactly when it is wanted. `AnalyzerTraceStore` is its own handle.
+- **Never boost a room null.** A dip is usually a cancellation and gain does not
+  fill it, it only burns headroom. The optimiser's boost cap defaults far below
+  its cut cap.
 
 ## Editing
 
@@ -138,9 +149,16 @@ Rust habit. Use `"""` multi-line strings.
 ## Where things stand
 
 Milestone 1 (real-time analyzer) is complete. Milestone 2 (swept measurement) is
-complete in the core and verified against a synthetic room. Milestone 3 (EQ) has
-graphic and parametric equalisers; target curves, the automatic PEQ optimiser
-and filter export are not started.
+complete and driven from the app as well as the CLI. Milestone 3 (EQ) is
+complete: graphic and parametric equalisers, target curves, the automatic PEQ
+optimiser, and filter export to REW, Equalizer APO and miniDSP.
+
+The macOS app is a sidebar of sections (RTA, Transfer, Measure, Spectrogram,
+Equaliser, Traces) with a per-section inspector, plus a standard Settings
+window. Trace capture and overlay and the running spectrogram are done.
+
+**Not started:** scope view, group delay, minimum-phase decomposition, and the
+Windows and Linux clients.
 
 **The one unmet plan commitment** is the REW parity run: ±0.1 dB on synthetic
 signals and ±0.5 dB on a real measurement, 20 Hz to 20 kHz. The harness exists

@@ -130,6 +130,29 @@ struct EqInfo {
     var clips: Bool { active && peakGainDb > 0.1 }
 }
 
+/// A curve captured for comparison.
+///
+/// The core stores it at analysis resolution and re-reduces it onto whatever
+/// axis is current, so this carries only what the list needs to describe it.
+struct CapturedTrace: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    var visible: Bool
+    /// Palette index chosen by the core when it was captured. The core does not
+    /// know what colour this is, only that two traces should not share one.
+    let colour: UInt32
+    let points: Int
+    let sampleRate: Float
+    let binSpacingHz: Float
+
+    var id: Int { index }
+
+    /// "16384 points · 2.93 Hz" — what the trace can actually resolve.
+    var detail: String {
+        String(format: "%d points · %.2f Hz", points, binSpacingHz)
+    }
+}
+
 /// A gridline.
 struct GridTick {
     let value: Float
@@ -480,6 +503,217 @@ final class AnalyzerSessionHandle {
             return Int(analyzer_session_copy_corrected(handle, base, UInt(columns)))
         }
         return correctedStorage[0..<written]
+    }
+
+    private var targetStorage: [Float] = []
+
+    /// The session's target curve.
+    var target: AnalyzerTarget? {
+        guard let handle else { return nil }
+        var raw = analyzer_target_default()
+        guard analyzer_session_target(handle, &raw) else { return nil }
+        return raw
+    }
+
+    func setTarget(_ target: AnalyzerTarget) {
+        guard let handle else { return }
+        var raw = target
+        _ = analyzer_session_set_target(handle, &raw)
+    }
+
+    /// Load a custom target from a frequency/level text file.
+    func loadTarget(from url: URL) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var status = AnalyzerStatus()
+        let ok = url.path.withCString { path in
+            analyzer_session_load_target(handle, path, &status)
+        }
+        guard ok else { throw AnalyzerError.failed(Self.message(from: status)) }
+    }
+
+    /// Align the target to the current measurement.
+    @discardableResult
+    func alignTarget() -> Bool {
+        guard let handle else { return false }
+        return analyzer_session_align_target(handle)
+    }
+
+    /// Copy the target curve, one level per pixel column.
+    func copyTarget(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if targetStorage.count < columns {
+            targetStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = targetStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_target(handle, base, UInt(columns)))
+        }
+        return targetStorage[0..<written]
+    }
+
+    private var measuredStorage: [Float] = []
+    private var impulseStorage: [Float] = []
+
+    // ---------------------------------------------------------- measurement -
+
+    /// Play a sweep and start recording the response.
+    func startMeasurement(_ config: AnalyzerMeasureConfig) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var settings = config
+        var status = AnalyzerStatus()
+        guard analyzer_session_start_measurement(handle, &settings, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+    }
+
+    var measureProgress: AnalyzerMeasureProgress? {
+        guard let handle else { return nil }
+        var raw = AnalyzerMeasureProgress()
+        guard analyzer_session_measure_progress(handle, &raw) else { return nil }
+        return raw
+    }
+
+    func cancelMeasurement() {
+        guard let handle else { return }
+        analyzer_session_cancel_measurement(handle)
+    }
+
+    /// Deconvolve the recording. Throws while the sweep is still playing.
+    func finishMeasurement() throws -> AnalyzerMeasureResult {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var result = AnalyzerMeasureResult()
+        var status = AnalyzerStatus()
+        guard analyzer_session_finish_measurement(handle, &result, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+        return result
+    }
+
+    var measurementResult: AnalyzerMeasureResult? {
+        guard let handle else { return nil }
+        var raw = AnalyzerMeasureResult()
+        guard analyzer_session_measurement_result(handle, &raw) else { return nil }
+        return raw
+    }
+
+    /// Copy the measured response, reduced onto the current axis.
+    func copyMeasured(columns: Int) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if measuredStorage.count < columns {
+            measuredStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = measuredStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_measured(handle, base, UInt(columns)))
+        }
+        return measuredStorage[0..<written]
+    }
+
+    /// Copy the impulse response, decimated and normalised to its peak.
+    func copyImpulse(columns: Int, seconds: Float) -> ArraySlice<Float> {
+        guard let handle, columns > 0 else { return [][...] }
+        if impulseStorage.count < columns {
+            impulseStorage = [Float](repeating: 0, count: columns)
+        }
+        let written = impulseStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_impulse(handle, base, UInt(columns), seconds))
+        }
+        return impulseStorage[0..<written]
+    }
+
+    private var spectrogramStorage: [Float] = []
+
+    /// Copy the newest frame reduced onto `rows` frequency positions.
+    ///
+    /// Decibels, not colours: mapping level to colour is the renderer's job.
+    func copySpectrogramColumn(rows: Int) -> ArraySlice<Float> {
+        guard let handle, rows > 0 else { return [][...] }
+        if spectrogramStorage.count < rows {
+            spectrogramStorage = [Float](repeating: 0, count: rows)
+        }
+        let written = spectrogramStorage.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_session_copy_spectrogram_column(handle, base, UInt(rows)))
+        }
+        return spectrogramStorage[0..<written]
+    }
+
+    /// Frequency ticks along an axis of `length`, without disturbing the plot
+    /// geometry the trace view declared.
+    func frequencyTicks(along length: Float) -> [GridTick] {
+        guard let handle, length > 0 else { return [] }
+        var raw = [AnalyzerTick](repeating: AnalyzerTick(), count: 64)
+        let count = raw.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Int(analyzer_frequency_ticks_for(handle, length, base, UInt(buffer.count)))
+        }
+        return raw.prefix(count).map {
+            GridTick(value: $0.value, position: $0.position, major: $0.major)
+        }
+    }
+
+    /// Capture the live curve into `store`.
+    ///
+    /// The store is passed in rather than owned here because it has to outlive
+    /// the session: transform size, window and averaging all restart one, and a
+    /// "before" trace that vanished when you changed the setting you wanted to
+    /// compare would be useless.
+    @discardableResult
+    func captureTrace(into store: TraceStore, named name: String?) -> Int? {
+        guard let handle, let storeHandle = store.handle else { return nil }
+        let index: Int = {
+            guard let name, !name.isEmpty else {
+                return Int(analyzer_trace_store_capture(storeHandle, handle, nil))
+            }
+            return name.withCString {
+                Int(analyzer_trace_store_capture(storeHandle, handle, $0))
+            }
+        }()
+        return index < 0 ? nil : index
+    }
+
+    /// Copy a captured trace, reduced onto this session's current axis.
+    func copyCapturedTrace(
+        _ index: Int,
+        from store: TraceStore,
+        columns: Int
+    ) -> ArraySlice<Float> {
+        guard let handle, let storeHandle = store.handle, columns > 0 else { return [][...] }
+        return store.withScratch(index, columns: columns) { base in
+            Int(analyzer_trace_store_copy(storeHandle, UInt(index), handle, base, UInt(columns)))
+        }
+    }
+
+    /// Fit filters to the gap between the measurement and the target.
+    ///
+    /// Replaces the parametric equaliser's bands and selects it, so the fit is
+    /// immediately drawn and heard.
+    ///
+    /// - Throws: [`AnalyzerError`] when there is nothing captured to correct.
+    @discardableResult
+    func optimise(_ config: AnalyzerOptimiserConfig) throws -> AnalyzerOptimisation {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var settings = config
+        var result = AnalyzerOptimisation()
+        var status = AnalyzerStatus()
+        guard analyzer_session_optimise(handle, &settings, &result, &status) else {
+            throw AnalyzerError.failed(Self.message(from: status))
+        }
+        return result
+    }
+
+    /// Write the active equaliser out in `format`.
+    ///
+    /// - Throws: [`AnalyzerError`] with whatever the core reported, which is
+    ///   either a filesystem problem or the equaliser being off.
+    func exportFilters(_ format: AnalyzerFilterFormat, to url: URL) throws {
+        guard let handle else { throw AnalyzerError.failed("no session running") }
+        var status = AnalyzerStatus()
+        let ok = url.path.withCString { path in
+            analyzer_session_export_filters(handle, format, path, &status)
+        }
+        guard ok else { throw AnalyzerError.failed(Self.message(from: status)) }
     }
 
     /// Restart the long-term average without disturbing the live trace.

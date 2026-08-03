@@ -1,36 +1,135 @@
 import SwiftUI
 import AnalyzerFFI
 
-/// The equaliser panel, below the plot.
+/// The equaliser, split between two places.
+///
+/// `EqualiserInspector` holds the settings — which equaliser, what it costs in
+/// headroom, what gets drawn. `EqualiserEditor` holds the faders and the filter
+/// list, which need real width and so live under the plot rather than in a
+/// 280-point column.
 ///
 /// Nothing here designs a filter or evaluates a response. Every edit goes
 /// straight to the core and the list is re-read from it, so the faders and the
 /// drawn curve cannot describe different filters.
-struct EqualiserView: View {
+
+// MARK: - Inspector
+
+struct EqualiserInspector: View {
     @ObservedObject var model: AnalyzerModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(alignment: .top, spacing: 16) {
-                if model.eqMode == AnalyzerEqMode_Graphic {
-                    graphic
-                } else {
-                    parametric
-                }
-                Divider()
-                controls
+        Section("Equaliser") {
+            Picker("Type", selection: $model.eqMode) {
+                Text("Off").tag(AnalyzerEqMode_Off)
+                Text("Graphic").tag(AnalyzerEqMode_Graphic)
+                Text("Parametric").tag(AnalyzerEqMode_Parametric)
             }
-            .padding(10)
+            .help("""
+                The equaliser is drawn against the measurement and applied to \
+                the generator, so the corrected curve is a prediction you can \
+                also hear.
+                """)
         }
+
+        if let info = model.eqInfo, info.active {
+            Section("Headroom") {
+                // Bands add, so this routinely exceeds any single setting. It is
+                // shown rather than corrected: quietly moving a level the user
+                // set is worse than telling them about it.
+                LabeledContent("Peak") {
+                    HStack(spacing: 4) {
+                        Text(String(format: "%+.1f dB", info.peakGainDb))
+                            .foregroundStyle(info.clips ? .orange : .primary)
+                        if info.clips {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .help("""
+                                    The equaliser asks for more than full scale \
+                                    and will clip. Trim removes exactly this much.
+                                    """)
+                        }
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                }
+
+                LabeledContent("Trim") {
+                    Text(String(format: "%+.1f dB", info.preampDb))
+                        .font(.system(size: 11, design: .monospaced))
+                }
+
+                HStack {
+                    Button("Trim") { model.trimEq() }
+                        .disabled(!model.isRunning)
+                        .help("Set the output trim so the equaliser's loudest point sits at unity.")
+                    Button("Flatten") { model.flattenEq() }
+                        .disabled(!model.isRunning)
+                }
+            }
+        }
+
+        TargetSettings(model: model)
+
+        OptimiserSettings(model: model)
+
+        Section("Display") {
+            Toggle("Corrected curve", isOn: $model.showCorrected)
+                .help("Draw the measurement with the equaliser applied, beside the raw one.")
+                .disabled(model.eqMode == AnalyzerEqMode_Off)
+        }
+
+        Section("Export") {
+            // The point of designing a correction against a measurement is to
+            // load it into whatever will actually apply it.
+            Menu {
+                Button("REW filter settings…") { model.exportFilters(AnalyzerFilterFormat_Rew) }
+                Button("Equalizer APO…") {
+                    model.exportFilters(AnalyzerFilterFormat_EqualizerApo)
+                }
+                Button("miniDSP biquads…") { model.exportFilters(AnalyzerFilterFormat_MiniDsp) }
+            } label: {
+                Label("Export filters", systemImage: "square.and.arrow.up")
+            }
+            .disabled(model.eqMode == AnalyzerEqMode_Off || !model.isRunning)
+        }
+    }
+}
+
+// MARK: - Editor
+
+/// The faders and filter list, shown under the plot while the equaliser section
+/// is selected.
+struct EqualiserEditor: View {
+    @ObservedObject var model: AnalyzerModel
+
+    var body: some View {
+        Group {
+            switch model.eqMode {
+            case AnalyzerEqMode_Graphic: graphic
+            case AnalyzerEqMode_Parametric: parametric
+            default: off
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(12)
         .background(.quaternary.opacity(0.25))
+    }
+
+    private var off: some View {
+        VStack(spacing: 6) {
+            Text("The equaliser is off.")
+                .foregroundStyle(.secondary)
+            Text("Choose Graphic or Parametric in the inspector to start.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // ------------------------------------------------------------- graphic --
 
     /// Ten faders on ISO octave centres.
     private var graphic: some View {
-        HStack(spacing: 4) {
+        HStack(alignment: .top, spacing: 4) {
             ForEach(model.eqBands) { band in
                 VStack(spacing: 2) {
                     Text(String(format: "%+.1f", band.gainDb))
@@ -55,18 +154,20 @@ struct EqualiserView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Spacer()
         }
     }
 
     // ---------------------------------------------------------- parametric --
 
     private var parametric: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             if model.eqBands.isEmpty {
                 Text("No filters. Add one to start.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                    .frame(height: 92, alignment: .center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 20)
             } else {
                 ScrollView(.vertical) {
                     VStack(spacing: 2) {
@@ -75,7 +176,6 @@ struct EqualiserView: View {
                         }
                     }
                 }
-                .frame(height: 116)
             }
 
             Button {
@@ -85,7 +185,6 @@ struct EqualiserView: View {
             }
             .disabled(!model.isRunning)
         }
-        .frame(minWidth: 460)
     }
 
     private func row(_ band: EqBand) -> some View {
@@ -107,13 +206,13 @@ struct EqualiserView: View {
             .labelsHidden()
             .frame(width: 108)
 
-            field("Hz", value: binding(band, \.hz), format: "%.0f", width: 62)
+            field(value: binding(band, \.hz), fraction: 0, width: 62)
             // Greyed rather than hidden, so the row does not reflow when the
             // shape changes - and so it is obvious that gain does nothing here.
-            field("Gain", value: binding(band, \.gainDb), format: "%.1f", width: 56)
+            field(value: binding(band, \.gainDb), fraction: 1, width: 56)
                 .disabled(!band.usesGain)
                 .opacity(band.usesGain ? 1 : 0.35)
-            field("Q", value: binding(band, \.q), format: "%.2f", width: 52)
+            field(value: binding(band, \.q), fraction: 2, width: 52)
 
             Button {
                 model.removeEqBand(band.id)
@@ -122,25 +221,16 @@ struct EqualiserView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
+
+            Spacer()
         }
         .font(.system(size: 11, design: .monospaced))
     }
 
-    private func field(
-        _ label: String,
-        value: Binding<Float>,
-        format: String,
-        width: CGFloat
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            TextField(
-                label,
-                value: value,
-                format: .number.precision(.fractionLength(format.contains(".0") ? 0 : 2))
-            )
+    private func field(value: Binding<Float>, fraction: Int, width: CGFloat) -> some View {
+        TextField("", value: value, format: .number.precision(.fractionLength(fraction)))
             .textFieldStyle(.roundedBorder)
             .frame(width: width)
-        }
     }
 
     /// Bind one field of a band, writing the whole band back to the core.
@@ -158,48 +248,5 @@ struct EqualiserView: View {
                 model.setEqBand(band.id, updated)
             }
         )
-    }
-
-    // ------------------------------------------------------------ controls --
-
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let info = model.eqInfo, info.active {
-                // Bands add, so this routinely exceeds any single setting. It
-                // is shown rather than corrected: quietly moving a level the
-                // user set is worse than telling them about it.
-                HStack(spacing: 6) {
-                    Text("peak")
-                        .foregroundStyle(.secondary)
-                    Text(String(format: "%+.1f dB", info.peakGainDb))
-                        .foregroundStyle(info.clips ? .orange : .primary)
-                    if info.clips {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .help("The equaliser asks for more than full scale and will clip. "
-                                  + "Trim removes exactly this much.")
-                    }
-                }
-                HStack(spacing: 6) {
-                    Text("trim")
-                        .foregroundStyle(.secondary)
-                    Text(String(format: "%+.1f dB", info.preampDb))
-                }
-            }
-
-            HStack(spacing: 6) {
-                Button("Trim") { model.trimEq() }
-                    .disabled(!model.isRunning)
-                    .help("Set the output trim so the equaliser's loudest point sits at unity.")
-                Button("Flatten") { model.flattenEq() }
-                    .disabled(!model.isRunning)
-            }
-
-            Toggle("Corrected", isOn: $model.showCorrected)
-                .toggleStyle(.checkbox)
-                .help("Draw the measurement with the equaliser applied, beside the raw one.")
-        }
-        .font(.system(size: 11, design: .monospaced))
-        .frame(width: 190, alignment: .leading)
     }
 }

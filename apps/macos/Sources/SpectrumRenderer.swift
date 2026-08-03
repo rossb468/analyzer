@@ -70,10 +70,14 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
     /// layer is not restricted to decibels: phase spans -180..180 and coherence
     /// spans 0..1 through exactly the same pipeline. Layers are drawn in list
     /// order, so whatever the user is watching move belongs last.
+    /// The colour is resolved per frame rather than fixed at construction. A
+    /// captured trace keeps the colour it was given even after an earlier one
+    /// is deleted, which means a layer's colour is not known when the layer
+    /// list is built.
     struct Layer {
         var provider: (Int) -> ArraySlice<Float>
         var range: (min: Float, max: Float)
-        var colour: SIMD4<Float>
+        var colour: () -> SIMD4<Float>
     }
 
     private let device: MTLDevice
@@ -166,7 +170,7 @@ final class SpectrumRenderer: NSObject, MTKViewDelegate {
             uniforms.count = Float(values.count)
             uniforms.minValue = layer.range.min
             uniforms.maxValue = layer.range.max
-            uniforms.colour = layer.colour
+            uniforms.colour = layer.colour()
 
             encoder.setVertexBuffer(layerBuffers[index], offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)

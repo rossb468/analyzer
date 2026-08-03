@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 analyzer-audio = { workspace = true }
+analyzer-cal = { workspace = true }
 analyzer-dsp = { workspace = true }
 analyzer-engine = { workspace = true }
 analyzer-model = { workspace = true }
