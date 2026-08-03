@@ -6,6 +6,9 @@
 //! If the callback ever allocates, the child aborts and every test here fails —
 //! which is the point.
 
+// Tests may unwrap freely: a panic here is a failing test, which is the point.
+#![allow(clippy::unwrap_used)]
+
 use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_analyzer-cli");
@@ -300,6 +303,224 @@ fn combining_input_modes_is_an_error() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("choose one of"), "{args:?} gave: {stderr}");
     }
+}
+
+// ------------------------------------------------------------- generation --
+
+/// The parity run's first step. It must produce real audio, not a header.
+#[test]
+fn generate_writes_a_playable_file() {
+    let path = std::env::temp_dir().join("analyzer-harness-generate.wav");
+    let _ = std::fs::remove_file(&path);
+
+    let output = run(&[
+        "--generate",
+        "sine",
+        "--hz",
+        "1000",
+        "--seconds",
+        "1",
+        "--out",
+        path.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut reader = hound::WavReader::open(&path).expect("should be a readable WAV");
+    assert_eq!(reader.spec().sample_rate, 48_000);
+    assert_eq!(reader.spec().channels, 1);
+    let samples: Vec<f32> = reader.samples::<f32>().map(Result::unwrap).collect();
+    assert_eq!(samples.len(), 48_000, "one second at 48 kHz");
+    assert!(
+        samples.iter().any(|s| s.abs() > 0.4),
+        "the file is silent - a header was written and the audio was not"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// --out is also the report destination, so generating had better not
+/// overwrite the audio with a line of text describing it.
+#[test]
+fn generate_does_not_overwrite_its_own_output_with_the_report() {
+    let path = std::env::temp_dir().join("analyzer-harness-clobber.wav");
+    let _ = std::fs::remove_file(&path);
+
+    let output = run(&[
+        "--generate",
+        "pink",
+        "--seconds",
+        "1",
+        "--out",
+        path.to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    let written = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        written > 100_000,
+        "only {written} bytes - the report clobbered it"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("wrote"),
+        "the summary should go to stdout"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn generate_rejects_an_unknown_signal_and_a_missing_destination() {
+    let output = run(&["--generate", "trombone", "--out", "/tmp/x.wav"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown signal"));
+
+    let output = run(&["--generate", "sine"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--out"));
+}
+
+// ------------------------------------------------------------- comparison --
+
+fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+/// A pure reference-convention difference must not read as a parity failure,
+/// which is the whole reason the offset is reported separately.
+#[test]
+fn compare_separates_a_constant_offset_from_the_shape() {
+    let ours = write_temp(
+        "analyzer-cmp-a.txt",
+        "100	0.0
+1000	0.0
+10000	0.0
+",
+    );
+    let theirs = write_temp(
+        "analyzer-cmp-b.txt",
+        "100	-3.01
+1000	-3.01
+10000	-3.01
+",
+    );
+
+    let output = run(&[
+        "--compare",
+        ours.to_str().unwrap(),
+        theirs.to_str().unwrap(),
+        "--tolerance",
+        "0.01",
+    ]);
+    assert!(
+        output.status.success(),
+        "a constant offset should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("+3.0100 dB"), "{report}");
+
+    let _ = std::fs::remove_file(&ours);
+    let _ = std::fs::remove_file(&theirs);
+}
+
+/// And a shape difference must fail, with a non-zero exit so the parity run can
+/// be a script rather than something a human reads.
+#[test]
+fn compare_fails_on_a_frequency_dependent_difference() {
+    let ours = write_temp(
+        "analyzer-cmp-c.txt",
+        "100	0.0
+1000	0.0
+10000	0.0
+",
+    );
+    let theirs = write_temp(
+        "analyzer-cmp-d.txt",
+        "100	-1.0
+1000	0.0
+10000	1.0
+",
+    );
+
+    let output = run(&[
+        "--compare",
+        ours.to_str().unwrap(),
+        theirs.to_str().unwrap(),
+        "--tolerance",
+        "0.1",
+    ]);
+    assert!(!output.status.success(), "a 1 dB tilt must fail");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("shapes differ"));
+
+    let _ = std::fs::remove_file(&ours);
+    let _ = std::fs::remove_file(&theirs);
+}
+
+#[test]
+fn compare_reports_a_file_it_cannot_read() {
+    let output = run(&["--compare", "nowhere.txt", "also-nowhere.txt"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("opening"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"));
+}
+
+/// Generated, analysed, and compared against itself: the whole loop the parity
+/// run walks, minus REW.
+#[test]
+fn a_generated_signal_round_trips_through_analysis_and_compares_to_itself() {
+    let wav = std::env::temp_dir().join("analyzer-harness-roundtrip.wav");
+    let _ = std::fs::remove_file(&wav);
+
+    assert!(
+        run(&[
+            "--generate",
+            "pink",
+            "--seconds",
+            "2",
+            "--out",
+            wav.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+
+    let analyse = || -> std::path::PathBuf {
+        let out =
+            std::env::temp_dir().join(format!("analyzer-harness-rt-{}.txt", std::process::id()));
+        let output = run(&[wav.to_str().unwrap(), "--fft", "4096"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&out, &output.stdout).unwrap();
+        out
+    };
+
+    let first = analyse();
+    let second = analyse();
+    let output = run(&[
+        "--compare",
+        first.to_str().unwrap(),
+        second.to_str().unwrap(),
+        "--tolerance",
+        "0.0001",
+    ]);
+    assert!(
+        output.status.success(),
+        "the same input analysed twice must agree exactly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_file(&wav);
+    let _ = std::fs::remove_file(&first);
+    let _ = std::fs::remove_file(&second);
 }
 
 /// Enumerating devices must not need capture permission. macOS prompts for the

@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use analyzer_audio::{AudioBuffers, DeviceId, OfflineBackend, Source, StreamConfig};
-use analyzer_dsp::{Averaging, Overlap, SpectrumAnalyzer, SpectrumConfig, WindowKind};
+use analyzer_dsp::{Averaging, Overlap, Signal, SpectrumAnalyzer, SpectrumConfig, WindowKind};
 use analyzer_engine::{SpectrumFrame, capture_ring, rt_section};
+use analyzer_model::SampleDepth;
 
 /// The allocation trap is inert unless a binary registers it. Doing so here is
 /// what makes the guard around every audio callback mean anything: if one ever
@@ -53,6 +54,19 @@ SWEPT MEASUREMENT:
     --measure <a> <b>    Deconvolve response <b> against stimulus <a>
     --measure-demo       Build a synthetic room and measure it end to end
     --gate <ms>          Gate length for the quasi-anechoic response (default 5)
+
+SIGNAL GENERATION:
+    --generate <kind>    Write a test signal: sine | pink | white | sweep
+    --out <file.wav>     Where to write it (required with --generate)
+    --depth <d>          i16 | i24 | f32 (default f32)
+    --hz <n>             Sine frequency, or sweep start (default 1000 / 20)
+    --hz-end <n>         Sweep end frequency (default 20000)
+
+COMPARISON:
+    --compare <a> <b>    Compare two frequency/level exports, <a> against <b>
+    --from-hz <n>        Low end of the compared band (default 20)
+    --to-hz <n>          High end of the compared band (default 20000)
+    --tolerance <db>     Fail unless the shapes agree this closely
 
 ANALYSIS:
     --fft <n>            FFT size, even (default 4096)
@@ -106,6 +120,9 @@ struct Args {
     meter: bool,
     gate_ms: f32,
     out: Option<PathBuf>,
+    from_hz: f64,
+    to_hz: f64,
+    tolerance: Option<f64>,
 }
 
 impl Args {
@@ -142,6 +159,17 @@ enum Input {
         stimulus: PathBuf,
         response: PathBuf,
     },
+    Generate {
+        signal: Signal,
+        rate: f64,
+        seconds: f64,
+        depth: SampleDepth,
+        out: PathBuf,
+    },
+    Compare {
+        subject: PathBuf,
+        reference: PathBuf,
+    },
 }
 
 fn run() -> Result<(), String> {
@@ -158,6 +186,67 @@ fn run() -> Result<(), String> {
             fft: args.fft,
             ..measure::MeasureOptions::default()
         })?,
+        Input::Generate {
+            signal,
+            rate,
+            seconds,
+            depth,
+            out,
+        } => {
+            let frames = analyzer_model::wav::write_signal(
+                out,
+                *signal,
+                *rate as f32,
+                *seconds as f32,
+                *depth,
+            )
+            .map_err(|e| e.to_string())?;
+            format!(
+                "# wrote {} frames ({:.3} s) at {} Hz, {} to {}\n",
+                frames,
+                frames as f64 / rate,
+                rate,
+                depth.as_key(),
+                out.display()
+            )
+        }
+        Input::Compare { subject, reference } => {
+            let read = |path: &PathBuf| -> Result<analyzer_model::Response, String> {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| format!("opening {}: {e}", path.display()))?;
+                let parsed = analyzer_model::Response::parse(&text);
+                if parsed.points.is_empty() {
+                    return Err(format!(
+                        "no frequency and level pairs found in {}",
+                        path.display()
+                    ));
+                }
+                Ok(parsed)
+            };
+            let subject_response = read(subject)?;
+            let reference_response = read(reference)?;
+            let result = analyzer_model::compare(
+                &subject_response,
+                &reference_response,
+                args.from_hz,
+                args.to_hz,
+            );
+
+            // A tolerance turns this into a gate rather than a readout, so the
+            // parity run can be a command that passes or fails.
+            if let Some(tolerance) = args.tolerance
+                && !result.agrees_within(tolerance)
+            {
+                return Err(format!(
+                    "{}\nshapes differ by {:.4} dB at {:.1} Hz, tolerance {:.4} dB",
+                    result.report(),
+                    result.max_deviation_after_offset,
+                    result.max_deviation_after_offset_hz,
+                    tolerance
+                ));
+            }
+            result.report()
+        }
         Input::Measure { stimulus, response } => measure::from_files(
             stimulus,
             response,
@@ -200,7 +289,15 @@ fn run() -> Result<(), String> {
         }
     };
 
-    match &args.out {
+    // --generate has already used --out for the audio itself, so its summary
+    // goes to stdout. Writing the report there too would overwrite the WAV with
+    // a line of text describing it.
+    let destination = match &args.input {
+        Input::Generate { .. } => None,
+        _ => args.out.as_ref(),
+    };
+
+    match destination {
         Some(path) => {
             fs::write(path, &report).map_err(|e| format!("writing {}: {e}", path.display()))?;
             eprintln!("wrote {}", path.display());
@@ -357,7 +454,9 @@ fn load_source(args: &Args) -> Result<Source, String> {
         | Input::ListDevices
         | Input::Bench { .. }
         | Input::MeasureDemo
-        | Input::Measure { .. } => Err("this mode does not load a source".into()),
+        | Input::Measure { .. }
+        | Input::Generate { .. }
+        | Input::Compare { .. } => Err("this mode does not load a source".into()),
     }
 }
 
@@ -432,6 +531,15 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut measure_demo = false;
     let mut measure_pair: Option<(PathBuf, PathBuf)> = None;
     let mut out: Option<PathBuf> = None;
+    let mut generate: Option<String> = None;
+    let mut compare_pair: Option<(PathBuf, PathBuf)> = None;
+    let mut depth = SampleDepth::default();
+    let mut hz = 1000.0_f64;
+    let mut hz_end = 20_000.0_f64;
+    let mut hz_given = false;
+    let mut from_hz = 20.0_f64;
+    let mut to_hz = 20_000.0_f64;
+    let mut tolerance: Option<f64> = None;
 
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     argv.reverse();
@@ -454,6 +562,25 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let response = PathBuf::from(value()?);
                 measure_pair = Some((stimulus, response));
             }
+            "--generate" => generate = Some(value()?),
+            "--compare" => {
+                let subject = PathBuf::from(value()?);
+                let reference = PathBuf::from(value()?);
+                compare_pair = Some((subject, reference));
+            }
+            "--depth" => {
+                let raw = value()?;
+                depth = SampleDepth::from_key(&raw)
+                    .ok_or_else(|| format!("--depth: unknown depth '{raw}' (i16, i24, f32)"))?;
+            }
+            "--hz" => {
+                hz = number(&value()?, "--hz")?;
+                hz_given = true;
+            }
+            "--hz-end" => hz_end = number(&value()?, "--hz-end")?,
+            "--from-hz" => from_hz = number(&value()?, "--from-hz")?,
+            "--to-hz" => to_hz = number(&value()?, "--to-hz")?,
+            "--tolerance" => tolerance = Some(number(&value()?, "--tolerance")?),
             "--bench" => {
                 let duration = match argv.last() {
                     Some(next) if next.parse::<f64>().is_ok() => {
@@ -541,15 +668,68 @@ fn parse_args() -> Result<Option<Args>, String> {
         bench_seconds.is_some(),
         measure_demo,
         measure_pair.is_some(),
+        generate.is_some(),
+        compare_pair.is_some(),
     ]
     .iter()
     .filter(|chosen| **chosen)
     .count();
     if selected > 1 {
-        return Err("choose one of: a WAV path, --sine, --live, --list-devices, --bench".into());
+        return Err(
+            "choose one of: a WAV path, --sine, --live, --list-devices, --bench, \
+             --generate, --compare"
+                .into(),
+        );
     }
 
-    let input = if list_devices {
+    let input = if let Some((subject, reference)) = compare_pair {
+        if from_hz <= 0.0 || !from_hz.is_finite() || to_hz <= from_hz || !to_hz.is_finite() {
+            return Err("--from-hz must be positive and below --to-hz".into());
+        }
+        Input::Compare { subject, reference }
+    } else if let Some(kind) = generate {
+        let Some(out) = out.clone() else {
+            return Err("--generate needs --out <file.wav>".into());
+        };
+        if rate <= 0.0 {
+            return Err("--rate must be positive".into());
+        }
+        if seconds <= 0.0 {
+            return Err("--seconds must be positive".into());
+        }
+        let amplitude = amplitude.clamp(0.0, 1.0);
+        let signal = match kind.as_str() {
+            "sine" => Signal::Sine {
+                // The sine default is 1 kHz; the sweep's is 20 Hz. Sharing one
+                // flag means the default has to depend on which was asked for.
+                hz: if hz_given { hz as f32 } else { 1000.0 },
+                amplitude,
+            },
+            "pink" => Signal::PinkNoise { amplitude },
+            "white" => Signal::WhiteNoise { amplitude },
+            "sweep" => Signal::Sweep {
+                start_hz: if hz_given { hz as f32 } else { 20.0 },
+                end_hz: hz_end as f32,
+                // One pass filling the file exactly. A repeating sweep would
+                // overlap its own tail and deconvolve into a second arrival.
+                seconds: seconds as f32,
+                amplitude,
+                repeat: false,
+            },
+            other => {
+                return Err(format!(
+                    "--generate: unknown signal '{other}' (sine, pink, white, sweep)"
+                ));
+            }
+        };
+        Input::Generate {
+            signal,
+            rate,
+            seconds,
+            depth,
+            out,
+        }
+    } else if list_devices {
         Input::ListDevices
     } else if measure_demo {
         Input::MeasureDemo
@@ -597,6 +777,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         meter,
         gate_ms,
         out,
+        from_hz,
+        to_hz,
+        tolerance,
     }))
 }
 

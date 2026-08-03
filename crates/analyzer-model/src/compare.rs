@@ -20,7 +20,7 @@
 //! A **frequency-dependent** deviation is the thing worth finding: a window
 //! amplitude correction applied where it should not be, an FFT scaling that
 //! forgot a factor of two, a calibration constant. That is what
-//! [`Comparison::deviation_after_offset`] isolates, and it is the number the
+//! [`Comparison::max_deviation_after_offset`] isolates, and it is the number the
 //! exit criterion should be read against once the conventions are reconciled.
 //!
 //! ## Interpolation
