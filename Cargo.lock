@@ -64,6 +64,7 @@ dependencies = [
  "analyzer-model",
  "analyzer-plot",
  "cbindgen",
+ "hound",
 ]
 
 [[package]]

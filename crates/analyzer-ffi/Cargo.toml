@@ -24,3 +24,6 @@ analyzer-plot = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }

@@ -45,6 +45,7 @@ use analyzer_engine::{
     AnalysisMode, Engine, EngineConfig, SnapshotPublisher, SnapshotReader, rt_section,
     snapshot_channel,
 };
+use analyzer_model::SampleDepth;
 use analyzer_model::settings::{AveragingChoice, WindowChoice};
 use analyzer_model::{
     FilterFormat, Measurement, MeasurementData, MeasurementId, MeasurementStore, References,
@@ -4106,6 +4107,118 @@ pub unsafe extern "C" fn analyzer_session_export_filters(
 }
 
 // ---------------------------------------------------------------------------
+// Signal generation to file
+//
+// Session-independent: rendering a signal needs no device, no stream and no
+// analysis, so a client can write a test file without starting anything.
+// ---------------------------------------------------------------------------
+
+/// Sample format for a written file.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzerSampleDepth {
+    /// 16-bit integer.
+    Int16 = 0,
+    /// 24-bit integer.
+    Int24 = 1,
+    /// 32-bit float. The default, because a generated signal has no reason to
+    /// be quantised.
+    Float32 = 2,
+}
+
+impl From<AnalyzerSampleDepth> for SampleDepth {
+    fn from(value: AnalyzerSampleDepth) -> Self {
+        match value {
+            AnalyzerSampleDepth::Int16 => SampleDepth::Int16,
+            AnalyzerSampleDepth::Int24 => SampleDepth::Int24,
+            AnalyzerSampleDepth::Float32 => SampleDepth::Float32,
+        }
+    }
+}
+
+/// Write a generated signal to `path`.
+///
+/// `level_db` is in dBFS and capped at 0: a generator that can write above full
+/// scale can only write something that clips. `hz` is the tone frequency or the
+/// sweep start; `end_hz` is used only by a sweep.
+///
+/// Returns the number of frames written, or 0 on failure with `status` set.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string. `status` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyzer_write_signal(
+    path: *const c_char,
+    signal: AnalyzerSignal,
+    hz: f32,
+    end_hz: f32,
+    level_db: f32,
+    seconds: f32,
+    sample_rate: f32,
+    depth: AnalyzerSampleDepth,
+    status: *mut AnalyzerStatus,
+) -> usize {
+    if path.is_null() {
+        unsafe { set_status(status, AnalyzerStatus::failure("null path")) };
+        return 0;
+    }
+    guard(0, || {
+        let path = match unsafe { std::ffi::CStr::from_ptr(path) }.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                unsafe { set_status(status, AnalyzerStatus::failure("path is not valid UTF-8")) };
+                return 0;
+            }
+        };
+
+        let amplitude = 10.0_f32.powf(level_db.min(0.0) / 20.0);
+        let rendered = match signal {
+            AnalyzerSignal::Silence => {
+                unsafe {
+                    set_status(status, AnalyzerStatus::failure("choose a signal to write"));
+                }
+                return 0;
+            }
+            AnalyzerSignal::Sine => Signal::Sine { hz, amplitude },
+            AnalyzerSignal::WhiteNoise => Signal::WhiteNoise { amplitude },
+            AnalyzerSignal::PinkNoise => Signal::PinkNoise { amplitude },
+            AnalyzerSignal::Sweep => Signal::Sweep {
+                start_hz: hz,
+                end_hz,
+                // One pass filling the file exactly. A repeating sweep would
+                // overlap its own tail.
+                seconds,
+                amplitude,
+                repeat: false,
+            },
+        };
+
+        match analyzer_model::wav::write_signal(
+            std::path::Path::new(&path),
+            rendered,
+            sample_rate,
+            seconds,
+            depth.into(),
+        ) {
+            Ok(frames) => {
+                unsafe { set_status(status, AnalyzerStatus::ok()) };
+                frames
+            }
+            Err(error) => {
+                unsafe {
+                    set_status(
+                        status,
+                        AnalyzerStatus::failure(&format!("writing {path}: {error}")),
+                    );
+                }
+                0
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 //
 // Preferences live in the core rather than in the platform's own defaults
@@ -4985,6 +5098,115 @@ mod tests {
             FilterFormat::from(AnalyzerFilterFormat::MiniDsp),
             FilterFormat::MiniDsp
         );
+    }
+
+    // --------------------------------------------------- signal to file --
+
+    #[test]
+    fn writing_a_signal_produces_real_audio() {
+        let path = std::env::temp_dir().join("analyzer-ffi-signal.wav");
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut status = AnalyzerStatus::default();
+        let frames = unsafe {
+            analyzer_write_signal(
+                c.as_ptr(),
+                AnalyzerSignal::Sine,
+                1000.0,
+                0.0,
+                -6.0,
+                0.5,
+                48_000.0,
+                AnalyzerSampleDepth::Float32,
+                &mut status,
+            )
+        };
+        assert_eq!(status.code, 0);
+        assert_eq!(frames, 24_000);
+        assert!(std::fs::metadata(&path).unwrap().len() > 90_000);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Silence is a valid stimulus setting and a meaningless file, so asking
+    /// for one is refused rather than producing a file of zeroes.
+    #[test]
+    fn writing_silence_is_refused() {
+        let path = std::env::temp_dir().join("analyzer-ffi-silence.wav");
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut status = AnalyzerStatus::default();
+        let frames = unsafe {
+            analyzer_write_signal(
+                c.as_ptr(),
+                AnalyzerSignal::Silence,
+                1000.0,
+                0.0,
+                -6.0,
+                0.5,
+                48_000.0,
+                AnalyzerSampleDepth::Float32,
+                &mut status,
+            )
+        };
+        assert_eq!(frames, 0);
+        assert_ne!(status.code, 0);
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    /// A level above full scale can only write something that clips.
+    #[test]
+    fn the_written_level_is_capped_at_full_scale() {
+        let path = std::env::temp_dir().join("analyzer-ffi-loud.wav");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let mut status = AnalyzerStatus::default();
+
+        unsafe {
+            analyzer_write_signal(
+                c.as_ptr(),
+                AnalyzerSignal::Sine,
+                1000.0,
+                0.0,
+                // Asking for +20 dBFS.
+                20.0,
+                0.1,
+                48_000.0,
+                AnalyzerSampleDepth::Float32,
+                &mut status,
+            )
+        };
+        assert_eq!(status.code, 0);
+
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        let peak = reader
+            .samples::<f32>()
+            .map(|s| s.unwrap().abs())
+            .fold(0.0_f32, f32::max);
+        assert!(peak <= 1.0 + 1e-6, "wrote {peak}, above full scale");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn writing_a_signal_tolerates_a_null_path() {
+        let mut status = AnalyzerStatus::default();
+        let frames = unsafe {
+            analyzer_write_signal(
+                ptr::null(),
+                AnalyzerSignal::Sine,
+                1000.0,
+                0.0,
+                -6.0,
+                0.5,
+                48_000.0,
+                AnalyzerSampleDepth::Float32,
+                &mut status,
+            )
+        };
+        assert_eq!(frames, 0);
+        assert_ne!(status.code, 0);
     }
 
     // ----------------------------------------------------------- settings --
