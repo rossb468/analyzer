@@ -1036,11 +1036,26 @@ mod tests {
 
         engine.reset_average();
 
-        // Feed enough for the worker to see the flag and publish again.
+        // Feed enough for the worker to see the flag and publish again, as a
+        // continuous stream rather than the same block over and over.
+        //
+        // Re-sending `samples[..256]` would not be the tone: 256 samples is
+        // 5.3125 cycles at this frequency, so repeating it restarts the phase
+        // every block and the discontinuity smears energy off bin 85. The live
+        // trace would then genuinely move, and whether this test passed would
+        // depend on how many such frames landed before `latest()` was read.
+        // The whole buffer is exactly 340 cycles, so wrapping it is seamless.
         let deadline = Instant::now() + Duration::from_secs(5);
         let target = engine.published_count() + 2;
+        let mut offset = 0;
         while engine.published_count() < target && Instant::now() < deadline {
-            let _ = sink.write_interleaved(&samples[..256.min(samples.len())]);
+            if offset >= samples.len() {
+                offset = 0;
+            }
+            let end = (offset + 256).min(samples.len());
+            if sink.write_interleaved(&samples[offset..end]) {
+                offset = end;
+            }
             thread::sleep(Duration::from_millis(1));
         }
 
