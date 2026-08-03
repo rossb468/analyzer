@@ -59,7 +59,7 @@ hand-rolling those three commands in a shell one-liner kept swallowing exit code
 The macOS app:
 
 ```bash
-./apps/macos/build.sh --run
+# see https://github.com/rossb468/analyzer-macos
 ```
 
 ## Trying it
@@ -137,7 +137,6 @@ crates/
   analyzer-model/     Measurements, store, file format, REW text export.
   analyzer-plot/      Display data reduction and axis transforms. Emits no pixels.
   analyzer-ffi/       Stable C ABI for the platform user interfaces.
-apps/macos/           Swift + SwiftUI shell with a Metal renderer.
 tools/analyzer-cli/   Headless harness and benchmarks.
 ```
 
@@ -185,7 +184,7 @@ forever. An unknown SPL offset stays `None` rather than becoming zero, because
 macOS comes first and deep, but the deferral is designed for rather than assumed
 away: no application logic lives in Swift, `AudioBackend` and `Fft` are traits
 with one implementation each, and no Apple SDK type appears outside
-`apps/macos/` and one `cfg(target_os = "macos")` module.
+one `cfg(target_os = "macos")` module, and the client repositories.
 
 ## Not done yet
 

@@ -58,9 +58,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
-      # The FFI crate is excluded here: it is the boundary to the platform UI
-      # and is covered by its own workflow. Everything below it must build with
-      # no platform audio backend at all.
+      # analyzer-ffi is excluded from the portable selection deliberately: it
+      # binds to CoreAudio directly, so it is macOS-only until a second backend
+      # exists. Everything listed here must build with no platform audio
+      # backend at all, which is what Linux and Windows are proving.
       - name: Clippy
         run: >
           cargo clippy --all-targets --all-features
@@ -72,6 +73,15 @@ jobs:
           cargo test --all-features
           -p analyzer-dsp -p analyzer-cal -p analyzer-plot -p analyzer-model
           -p analyzer-engine -p analyzer-audio -p analyzer-cli
+
+      # The C ABI, where it can run at all. The client repository builds Swift
+      # against it, but the crate lives here and should not depend on a client
+      # being checked out for anyone to know it still compiles.
+      - name: Clippy and test the FFI
+        if: matrix.os == 'macos-latest'
+        run: |
+          cargo clippy --all-targets --all-features -p analyzer-ffi
+          cargo test --all-features -p analyzer-ffi
 
       # The allocation trap only proves anything when it actually runs. A debug
       # build registers the tracking allocator, so if the audio callback

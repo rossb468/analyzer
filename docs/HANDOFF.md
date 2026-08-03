@@ -75,9 +75,21 @@ crates/analyzer-engine/  RT graph, lock-free ring, snapshot publication
 crates/analyzer-model/   measurements, formats, filter export, settings
 crates/analyzer-plot/    display reduction + axis transforms. Emits no pixels.
 crates/analyzer-ffi/     staticlib, C ABI, cbindgen-generated header
-apps/macos/Sources/      Swift + SwiftUI shell, two Metal renderers
 tools/analyzer-cli/      headless harness, live capture, bench, sweep measure
 ```
+
+The clients live in their own repositories and consume this one as a pinned
+submodule. Today that is [analyzer-macos][macos]: Swift, SwiftUI and two Metal
+renderers. Bumping the pin is a commit in the client, so which core a given app
+build was made against is recorded rather than implied.
+
+Splitting them is what makes "check out and build the core alone" true rather
+than aspirational, and the core's CI runs on Linux, Windows and macOS to keep
+it that way. `analyzer-ffi` is the exception: it binds to CoreAudio directly and
+so is macOS-only until a second backend exists. Making it portable is part of
+the port work, not a loose end.
+
+[macos]: https://github.com/rossb468/analyzer-macos
 
 The dependency graph is acyclic and deliberately shallow: `dsp`, `cal` and
 `plot` are leaves; `engine` depends on `dsp`; `model` depends on `dsp`; `ffi`
@@ -95,22 +107,25 @@ allocator away and a binary still needs a `#[global_allocator]`. The analysis
 thread is a different matter — it may lock, and does, for the measurement
 recording buffer.
 
-**No application logic in Swift.** View state, layout, gestures and Metal draw
-calls only. Analysis config, unit conversion, smoothing, axis scaling, trace
-management, calibration and file I/O live in Rust. Swift must never compute a
-bin-to-pixel mapping; it calls `analyzer_freq_to_x`, `analyzer_x_to_freq`,
-`analyzer_db_to_y`, `analyzer_y_to_db`, `analyzer_phase_to_y`,
-`analyzer_coherence_to_y`. This single discipline decides whether the Windows
-and Linux ports are weeks or months, and the temptation to break it peaks
-exactly when moving fast.
+**No application logic in the clients.** Analysis config, unit conversion,
+smoothing, axis scaling, trace management, calibration and file I/O live here. A
+client must never compute a bin-to-pixel mapping; it calls `analyzer_freq_to_x`,
+`analyzer_x_to_freq`, `analyzer_db_to_y`, `analyzer_y_to_db`,
+`analyzer_phase_to_y`, `analyzer_coherence_to_y`. This single discipline decides
+whether the Windows and Linux ports are weeks or months, and the temptation to
+break it peaks exactly when moving fast.
 
-The one arithmetic Swift is allowed is **pixels to points**, because that is a
-platform coordinate-space concern rather than an analysis one. `plotScale`
-carries the ratio.
+Separate repositories make this harder to break by accident, but they do not
+enforce it: a client can always reimplement the maths locally. The check is that
+every number on screen came from a call, not a calculation.
 
-**No Apple SDK types below `apps/macos/`.** Enforced by the crate graph. Only
-`analyzer-audio` may depend on an Apple crate, and only behind
-`cfg(target_os = "macos")`.
+The one arithmetic a client is allowed is **pixels to points**, because that is
+a platform coordinate-space concern rather than an analysis one.
+
+**No Apple SDK types in the core.** Enforced by the crate graph and, since the
+split, by CI: only `analyzer-audio` may depend on an Apple crate, and only
+behind `cfg(target_os = "macos")`. Linux is where this breaks first, because it
+has no audio stack, no window server and no Apple SDK.
 
 **Storage is unsmoothed, complex, at native sample rate.** Smoothing and
 fractional-octave banding are view transforms. Storing smoothed magnitude
@@ -231,24 +246,24 @@ saved like an RTA capture.
 
 Beyond the trap list in `CLAUDE.md`:
 
-- **CI does not cover feature branches.** `.github/workflows` triggers on
+- **CI does not cover feature branches.** Workflows trigger on
   `push: branches: [main]` and `pull_request`, so a pushed feature branch runs
   nothing. Local `check.sh` is the only signal until merge.
+- **Cross-compiling is not cross-testing.** `cargo clippy --target
+  x86_64-unknown-linux-gnu` proves the core builds; it cannot run a Linux
+  binary. A CLI test asserting an exit code passed that check and failed on
+  Ubuntu and Windows immediately. Only the matrix catches runtime differences.
+- **An FFI change is now a two-repository change.** The C ABI lives here and
+  Swift compiles against it there, so a change that satisfies Rust can break the
+  client, and cbindgen rewrites the header silently. The client's CI is what
+  notices. Bump its submodule pin in the same sitting or the break is somebody
+  else's surprise.
 - **The UI has never been visually verified by an agent.** Screen recording and
   accessibility permissions are not granted to the terminal, so agent sessions
   can confirm the app builds, launches and does not crash, and nothing more. A
   selection bug that made every sidebar row unclickable compiled and ran
-  cleanly. Ask the human to look.
-- **`SelectionValue` inference.** `List(selection:)` takes
-  `Binding<SelectionValue?>`. Passing a non-optional binding compiles, promotes
-  `SelectionValue` to the optional, and silently matches no `.tag()`. Write the
-  optional binding out explicitly.
-- **One device does both directions.** macOS drives one device per audio
-  callback, so playing a stimulus and recording the response needs a single
-  device that can do both — an Aggregate Device on most laptops. This is the
-  most confusing thing about the app for a new user; the messages explaining it
-  are in `OutputHint.swift` and should stay explanatory rather than becoming
-  terse.
+  cleanly. Ask the human to look. This now lives in the client repository, whose
+  `CLAUDE.md` says the same thing.
 - **The measurement's arrival time includes the converter round trip.** The
   sweep is armed and the recording started as two operations with nothing
   synchronising them to a sample. Correcting it needs a loopback reference,

@@ -26,7 +26,6 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 | Task | Command |
 |---|---|
 | The gate — fmt, clippy, test | `./check.sh` |
-| Build and run the macOS app | `./apps/macos/build.sh --run` |
 | Headless harness | `cargo run -p analyzer-cli -- --help` |
 | Performance | `cargo run --release -p analyzer-cli -- --bench` |
 | End-to-end sanity | `cargo run --release -p analyzer-cli -- --measure-demo` |
@@ -45,7 +44,6 @@ crates/analyzer-model/   measurements, versioned format, REW text export,
                          filter export, program settings
 crates/analyzer-plot/    display reduction + axis transforms. Emits no pixels.
 crates/analyzer-ffi/     staticlib, C ABI, cbindgen-generated header
-apps/macos/Sources/      Swift + SwiftUI shell, Metal renderer
 tools/analyzer-cli/      headless harness, live capture, bench, sweep measure
 ```
 
@@ -60,16 +58,25 @@ allocation in debug and test builds. In release `AllocTrap` aliases
 `std::alloc::System`, because `assert_no_alloc` compiles its allocator away and
 a binary still needs a `#[global_allocator]`.
 
-**No application logic in Swift.** View state, layout, gestures and Metal draw
-calls only. Analysis config, unit conversion, smoothing, axis scaling, trace
-management, calibration and file I/O live in Rust. Swift must never compute a
-bin-to-pixel mapping; it calls `analyzer_freq_to_x`, `analyzer_x_to_freq`,
-`analyzer_db_to_y`, `analyzer_y_to_db`, `analyzer_phase_to_y`,
-`analyzer_coherence_to_y`. This decides whether the Windows and Linux ports are
-weeks or months, and the temptation to break it peaks when moving fast.
+**No application logic in the clients.** Analysis config, unit conversion,
+smoothing, axis scaling, trace management, calibration and file I/O live here. A
+client must never compute a bin-to-pixel mapping; it calls `analyzer_freq_to_x`,
+`analyzer_x_to_freq`, `analyzer_db_to_y`, `analyzer_y_to_db`,
+`analyzer_phase_to_y`, `analyzer_coherence_to_y`. This decides whether the
+Windows and Linux ports are weeks or months, and the temptation to break it
+peaks when moving fast.
 
-**No Apple SDK types below `apps/macos/`.** Only `analyzer-audio` may depend on
-an Apple crate, and only behind `cfg(target_os = "macos")`.
+The macOS client lives in its own repository ([analyzer-macos](https://github.com/rossb468/analyzer-macos)) and
+consumes this one as a pinned submodule. Anything that changes the C ABI needs a
+matching change there, and its CI is what catches the mismatch.
+
+**No Apple SDK types anywhere in this repository.** Only `analyzer-audio` may
+depend on an Apple crate, and only behind `cfg(target_os = "macos")`. Everything
+else must build on Linux and Windows, which CI checks on every push.
+
+The headless harness follows the same rule: live capture is confined to
+`live_coreaudio.rs` behind a `cfg`, so WAV analysis, the bench and swept
+measurement run anywhere.
 
 **Storage is unsmoothed, complex, at native sample rate.** Smoothing and
 fractional-octave banding are view transforms. Storing smoothed magnitude
@@ -121,12 +128,11 @@ Each of these cost real time. Most now have a guard or a regression test.
 - **Ganged octave EQ faders overshoot ~1.8 dB.** Inherent to constant-Q, not a
   defect. Documented, not asserted away.
 - **cbindgen:** `cpp_compat = false`, and the Swift build passes `-Xcc -std=c23`.
-  Otherwise Swift sees two candidates for every enum.
+  Otherwise Swift sees two candidates for every enum. cbindgen also rewrites the
+  header silently, so a C ABI change this repository is happy with can break the
+  client; its CI is what notices.
 - **`build.sh` targets bash 3.2 under `set -u`.** Empty arrays explode; it uses
   plain strings.
-- **Tick positions come back in drawable pixels, not points.** Placing a
-  SwiftUI label at one directly puts it at double its position on any Retina
-  display. `AnalyzerModel.plotScale` carries the ratio.
 - **miniDSP negates the biquad feedback coefficients.** Its difference equation
   adds the terms the standard form subtracts. Exporting without flipping `a1`
   and `a2` yields an unstable filter, and the file looks correct.
@@ -139,12 +145,9 @@ Each of these cost real time. Most now have a guard or a regression test.
 
 ## Editing
 
-Large multi-hunk edits to Rust and Swift have gone best as Python patch scripts
+Large multi-hunk edits have gone best as Python patch scripts
 **written to a file first, then run** — a heredoc that aborts on an anchor
 mismatch leaves the file untouched and forces a full re-run.
-
-**Swift has no backslash line-continuation inside string literals.** That is a
-Rust habit. Use `"""` multi-line strings.
 
 ## Where things stand
 
@@ -153,9 +156,9 @@ complete and driven from the app as well as the CLI. Milestone 3 (EQ) is
 complete: graphic and parametric equalisers, target curves, the automatic PEQ
 optimiser, and filter export to REW, Equalizer APO and miniDSP.
 
-The macOS app is a sidebar of sections (RTA, Transfer, Measure, Spectrogram,
-Equaliser, Traces) with a per-section inspector, plus a standard Settings
-window. Trace capture and overlay and the running spectrogram are done.
+The [macOS client](https://github.com/rossb468/analyzer-macos) is a sidebar of sections (RTA, Transfer, Measure,
+Spectrogram, Equaliser, Traces) with a per-section inspector and a standard
+Settings window.
 
 **Not started:** scope view, group delay, minimum-phase decomposition, and the
 Windows and Linux clients.
