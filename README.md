@@ -60,10 +60,11 @@ Needs Rust 1.88 or newer — let-chains — and Xcode for the macOS app.
 That runs format, lint and the full test suite as one gate. It exists because
 hand-rolling those three commands in a shell one-liner kept swallowing exit codes.
 
-The macOS app:
+The apps:
 
 ```bash
 # see https://github.com/rossb468/analyzer-macos
+# and https://github.com/rossb468/analyzer-ios
 ```
 
 ## Trying it
@@ -203,7 +204,9 @@ forever. An unknown SPL offset stays `None` rather than becoming zero, because
 macOS comes first and deep, but the deferral is designed for rather than assumed
 away: no application logic lives in Swift, `AudioBackend` and `Fft` are traits
 with one implementation each, and no Apple SDK type appears outside
-one `cfg(target_os = "macos")` module, and the client repositories.
+the `cfg(target_os = "macos")` and `cfg(target_os = "ios")` modules of
+`analyzer-audio`, and the client repositories. Everything else, the C ABI
+included, builds and passes its tests on Linux and Windows.
 
 ## Not done yet
 
@@ -221,8 +224,9 @@ used to automate it.
 Also outstanding: scope view, group delay, minimum-phase decomposition, and the
 Windows and Linux clients.
 
-The macOS client lives in [its own repository](https://github.com/rossb468/analyzer-macos) and consumes this one as a
-pinned submodule.
+The macOS client lives in [its own repository](https://github.com/rossb468/analyzer-macos), and the iPhone and iPad
+client in [another](https://github.com/rossb468/analyzer-ios). Both consume this
+one as a pinned submodule.
 
 ## A note on microphone permission
 

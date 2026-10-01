@@ -79,8 +79,8 @@ tools/analyzer-cli/      headless harness, live capture, bench, sweep measure
 ```
 
 The clients live in their own repositories and consume this one as a pinned
-submodule. Today that is [analyzer-macos][macos]: Swift, SwiftUI and two Metal
-renderers. Bumping the pin is a commit in the client, so which core a given app
+submodule. Today that is [analyzer-macos][macos] and [analyzer-ios][ios]: Swift,
+SwiftUI and two Metal renderers each. Bumping the pin is a commit in the client, so which core a given app
 build was made against is recorded rather than implied.
 
 Splitting them is what makes "check out and build the core alone" true rather
@@ -91,6 +91,7 @@ where none exists yet, an empty stand-in that lists no devices and refuses to
 open. The C ABI therefore compiles and passes its tests everywhere.
 
 [macos]: https://github.com/rossb468/analyzer-macos
+[ios]: https://github.com/rossb468/analyzer-ios
 
 The dependency graph is acyclic and deliberately shallow: `dsp`, `cal` and
 `plot` are leaves; `engine` depends on `dsp`; `model` depends on `dsp`; `ffi`
@@ -125,8 +126,10 @@ a platform coordinate-space concern rather than an analysis one.
 
 **No Apple SDK types in the core.** Enforced by the crate graph and, since the
 split, by CI: only `analyzer-audio` may depend on an Apple crate, and only
-behind `cfg(target_os = "macos")`. Linux is where this breaks first, because it
-has no audio stack, no window server and no Apple SDK.
+behind `cfg(target_os = "macos")` or `cfg(target_os = "ios")`. Linux is where
+this breaks first, because it has no audio stack, no window server and no Apple
+SDK. The iOS backend uses objc2's generated bindings rather than bindgen, so CI
+type-checks it from Linux without an SDK.
 
 **Storage is unsmoothed, complex, at native sample rate.** Smoothing and
 fractional-octave banding are view transforms. Storing smoothed magnitude
@@ -162,6 +165,13 @@ REW, Equalizer APO and miniDSP.
 Spectrogram, Equaliser, Traces — with a per-section inspector and a standard
 `Settings` scene. Trace capture and overlay and the running spectrogram are
 done. Live capture is verified against real hardware.
+
+**The iOS app** is the same sections as chips under the plot, with the
+inspector below it upright and beside it turned. Its backend is RemoteIO with an
+`AVAudioSession` in measurement mode, so iOS applies no gain control or voice
+processing; a device is an input port, and output follows the session's route,
+which removes the aggregate-device problem macOS has. CI builds it and launches
+it in the simulator. It has not yet been checked on a phone.
 
 **Measured performance** (`--bench`, M1 Pro). Every target passes with three to
 four orders of magnitude of headroom: spectrum at 16384 points 0.0029 duty,

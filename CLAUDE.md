@@ -68,9 +68,11 @@ client must never compute a bin-to-pixel mapping; it calls `analyzer_freq_to_x`,
 Windows and Linux ports are weeks or months, and the temptation to break it
 peaks when moving fast.
 
-The macOS client lives in its own repository ([analyzer-macos](https://github.com/rossb468/analyzer-macos)) and
-consumes this one as a pinned submodule. Anything that changes the C ABI needs a
-matching change there, and its CI is what catches the mismatch.
+The clients live in their own repositories
+([analyzer-macos](https://github.com/rossb468/analyzer-macos) and
+[analyzer-ios](https://github.com/rossb468/analyzer-ios)) and consume this one
+as a pinned submodule. Anything that changes the C ABI needs a matching change
+in both, and their CI is what catches the mismatch.
 
 **No Apple SDK types anywhere in this repository.** Only `analyzer-audio` may
 depend on an Apple crate, and only behind `cfg(target_os = "macos")` or
@@ -163,6 +165,12 @@ optimiser, and filter export to REW, Equalizer APO and miniDSP.
 The [macOS client](https://github.com/rossb468/analyzer-macos) is a sidebar of sections (RTA, Transfer, Measure,
 Spectrogram, Equaliser, Traces) with a per-section inspector and a standard
 Settings window.
+
+The [iOS client](https://github.com/rossb468/analyzer-ios) has the same sections
+as chips under the plot, for iPhone and iPad. Its audio is `ios.rs` in
+`analyzer-audio`: RemoteIO plus an `AVAudioSession` in measurement mode, one
+input port per device. It builds and launches in the simulator in CI and has not
+yet been looked at on a phone.
 
 **Not started:** scope view, group delay, minimum-phase decomposition, and the
 Windows and Linux clients.
