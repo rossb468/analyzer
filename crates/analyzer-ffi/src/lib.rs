@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use analyzer_audio::{
-    AudioBackend, AudioBuffers, AudioStream, CoreAudioBackend, DeviceId, DeviceInfo, StreamConfig,
+    AudioBuffers, AudioStream, DeviceId, DeviceInfo, StreamConfig, default_backend,
 };
 use analyzer_dsp::deconv::DEFAULT_REGULARISATION;
 use analyzer_dsp::target::{ALIGN_FROM_HZ, ALIGN_TO_HZ};
@@ -163,7 +163,7 @@ pub struct AnalyzerDevice {
 #[unsafe(no_mangle)]
 pub extern "C" fn analyzer_device_list_create() -> *mut AnalyzerDeviceList {
     guard(ptr::null_mut(), || {
-        let devices = CoreAudioBackend::new().devices().unwrap_or_default();
+        let devices = default_backend().devices().unwrap_or_default();
         let strings = devices
             .iter()
             .map(|d| {
@@ -961,7 +961,7 @@ fn start_session(
         ));
     }
 
-    let mut backend = CoreAudioBackend::new();
+    let mut backend = default_backend();
     let device = match uid {
         Some(uid) => backend
             .devices()
@@ -4764,8 +4764,6 @@ mod tests {
         assert!(!list.is_null());
         unsafe {
             let count = analyzer_device_list_count(list);
-            assert!(count > 0, "expected at least one device");
-
             let mut device = AnalyzerDevice {
                 uid: ptr::null(),
                 name: ptr::null(),
@@ -4774,6 +4772,16 @@ mod tests {
                 sample_rate: 0.0,
                 is_default_input: false,
             };
+
+            // Where there is no platform backend the list is honestly empty,
+            // and must still behave: no entry to read, nothing to crash on.
+            if cfg!(not(any(target_os = "macos", target_os = "ios"))) {
+                assert_eq!(count, 0, "no backend, yet devices were listed");
+                assert!(!analyzer_device_list_get(list, 0, &mut device));
+                analyzer_device_list_destroy(list);
+                return;
+            }
+            assert!(count > 0, "expected at least one device");
             assert!(analyzer_device_list_get(list, 0, &mut device));
             assert!(!device.uid.is_null() && !device.name.is_null());
             let uid = std::ffi::CStr::from_ptr(device.uid).to_str().unwrap();

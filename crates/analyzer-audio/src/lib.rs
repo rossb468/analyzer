@@ -5,10 +5,10 @@
 //! channel counts are where general-purpose audio wrappers are weakest, and a
 //! measurement tool lives or dies on device control.
 //!
-//! Today there is one real implementation, [`OfflineBackend`], which reads from
-//! memory and drives the headless harness. CoreAudio comes next; WASAPI and
-//! ALSA/PipeWire arrive with the other clients. The trait existing before the
-//! second implementation does is what keeps that port cheap.
+//! [`OfflineBackend`] reads from memory and drives the headless harness.
+//! CoreAudio drives macOS. WASAPI and ALSA/PipeWire arrive with the other
+//! clients. [`default_backend`] picks the one for the build's target, so nothing
+//! above this crate names a platform.
 //!
 //! No Apple SDK type appears anywhere in this crate outside a
 //! `cfg(target_os = "macos")` module, and no other `analyzer-*` crate depends on
@@ -20,6 +20,7 @@ pub mod coreaudio;
 pub mod device;
 pub mod error;
 pub mod offline;
+pub mod platform;
 pub mod stream;
 
 pub use backend::AudioBackend;
@@ -28,4 +29,5 @@ pub use coreaudio::{CoreAudioBackend, CoreAudioStream};
 pub use device::{DeviceId, DeviceInfo};
 pub use error::AudioError;
 pub use offline::{OfflineBackend, OfflineStream, Source};
+pub use platform::{UnavailableBackend, default_backend};
 pub use stream::{AudioBuffers, AudioCallback, AudioStream, StreamConfig, StreamLatency};

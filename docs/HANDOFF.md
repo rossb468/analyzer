@@ -85,9 +85,10 @@ build was made against is recorded rather than implied.
 
 Splitting them is what makes "check out and build the core alone" true rather
 than aspirational, and the core's CI runs on Linux, Windows and macOS to keep
-it that way. `analyzer-ffi` is the exception: it binds to CoreAudio directly and
-so is macOS-only until a second backend exists. Making it portable is part of
-the port work, not a loose end.
+it that way. That includes `analyzer-ffi`: it reaches hardware only through
+`analyzer_audio::default_backend()`, which picks the platform's backend and,
+where none exists yet, an empty stand-in that lists no devices and refuses to
+open. The C ABI therefore compiles and passes its tests everywhere.
 
 [macos]: https://github.com/rossb468/analyzer-macos
 
