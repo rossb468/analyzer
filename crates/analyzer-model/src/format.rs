@@ -300,9 +300,10 @@ fn read_real(data: &[u8], count: usize, offset: usize) -> Result<Vec<f64>, Forma
     Ok(data
         .get(offset..needed)
         .unwrap_or(&[])
-        .chunks_exact(8)
-        .filter_map(|chunk| chunk.try_into().ok())
-        .map(f64::from_le_bytes)
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -317,11 +318,13 @@ fn read_complex(data: &[u8], count: usize) -> Result<Vec<Complex64>, FormatError
     Ok(data
         .get(..needed)
         .unwrap_or(&[])
-        .chunks_exact(16)
-        .filter_map(|chunk| {
-            let re = chunk.get(..8)?.try_into().ok().map(f64::from_le_bytes)?;
-            let im = chunk.get(8..)?.try_into().ok().map(f64::from_le_bytes)?;
-            Some(Complex64::new(re, im))
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|chunk| {
+            let (re, im) = chunk.split_at(8);
+            let part = |bytes: &[u8]| bytes.try_into().map_or(0.0, f64::from_le_bytes);
+            Complex64::new(part(re), part(im))
         })
         .collect())
 }

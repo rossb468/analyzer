@@ -195,7 +195,7 @@ fn available_rates(device: AudioDeviceID) -> Vec<f64> {
         return Vec::new();
     };
     let mut rates = Vec::new();
-    for chunk in bytes.chunks_exact(size_of::<AudioValueRange>()) {
+    for chunk in bytes.as_chunks::<{ size_of::<AudioValueRange>() }>().0 {
         // SAFETY: chunk is exactly one AudioValueRange, correctly aligned since
         // the allocation came from a Vec<u8> read of an array of them.
         let range = unsafe { ptr::read_unaligned(chunk.as_ptr().cast::<AudioValueRange>()) };
@@ -218,9 +218,10 @@ fn all_device_ids() -> Vec<AudioDeviceID> {
         return Vec::new();
     };
     bytes
-        .chunks_exact(size_of::<AudioDeviceID>())
-        .filter_map(|c| c.try_into().ok())
-        .map(AudioDeviceID::from_ne_bytes)
+        .as_chunks::<{ size_of::<AudioDeviceID>() }>()
+        .0
+        .iter()
+        .map(|c| AudioDeviceID::from_ne_bytes(*c))
         .collect()
 }
 
