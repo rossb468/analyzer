@@ -16,3 +16,22 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation-sys = { workspace = true }
 coreaudio-sys = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+objc2-audio-toolbox = { workspace = true, features = [
+    "std",
+    "AUComponent",
+    "AudioComponent",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-avf-audio = { workspace = true, features = [
+    "std",
+    "AVAudioSession",
+    "AVAudioSessionRoute",
+    "AVAudioSessionTypes",
+] }
+objc2-core-audio-types = { workspace = true, features = ["std", "CoreAudioBaseTypes"] }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSString"] }

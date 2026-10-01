@@ -23,6 +23,16 @@ cargo fmt --all
 echo "==> clippy"
 cargo clippy --all-targets --all-features -- -D warnings
 
+# The iOS backend only compiles for iOS, so the host clippy above never sees
+# it. Type-checking it needs the target's standard library and nothing else.
+if rustup target list --installed 2>/dev/null | grep -x aarch64-apple-ios > /dev/null; then
+    echo "==> clippy (iOS)"
+    cargo clippy --all-targets --all-features --target aarch64-apple-ios \
+        -p analyzer-audio -p analyzer-ffi -- -D warnings
+else
+    echo "==> clippy (iOS) skipped: rustup target add aarch64-apple-ios"
+fi
+
 echo "==> test"
 set +e
 cargo test --workspace --all-features > "$LOG" 2>&1

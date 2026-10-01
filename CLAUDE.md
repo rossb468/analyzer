@@ -40,7 +40,7 @@ broken commits shipped before it was fixed.
 ```
 crates/analyzer-dsp/     the maths. No I/O, no OS deps.
 crates/analyzer-cal/     calibration chain, dBFS to absolute dB SPL
-crates/analyzer-audio/   AudioBackend trait + CoreAudio implementation
+crates/analyzer-audio/   AudioBackend trait, CoreAudio (macOS) and RemoteIO (iOS)
 crates/analyzer-engine/  RT graph, lock-free ring, snapshot publication
 crates/analyzer-model/   measurements, versioned format, REW text export,
                          filter export, program settings
@@ -73,8 +73,10 @@ consumes this one as a pinned submodule. Anything that changes the C ABI needs a
 matching change there, and its CI is what catches the mismatch.
 
 **No Apple SDK types anywhere in this repository.** Only `analyzer-audio` may
-depend on an Apple crate, and only behind `cfg(target_os = "macos")`. Everything
-else must build on Linux and Windows, which CI checks on every push.
+depend on an Apple crate, and only behind `cfg(target_os = "macos")` or
+`cfg(target_os = "ios")`. Everything else - the FFI included - must build on
+Linux and Windows, which CI checks on every push. Nothing outside
+`analyzer-audio` names a backend type; it asks `default_backend()`.
 
 The headless harness follows the same rule: live capture is confined to
 `live_coreaudio.rs` behind a `cfg`, so WAV analysis, the bench and swept

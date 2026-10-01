@@ -94,3 +94,33 @@ jobs:
       # deconvolution, gating and decay chain on a platform with no audio device.
       - name: Swept measurement
         run: cargo run --release -p analyzer-cli -- --measure-demo
+
+  # The iOS backend and the C ABI as the iPhone client links them. The bindings
+  # are generated Rust rather than bindgen output, so this needs no Apple SDK
+  # and runs on Linux - which is also the proof that nothing iOS-specific
+  # leaked out of its cfg into a crate that has to build everywhere.
+  ios:
+    name: ios (type-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-ios
+
+      - name: Clippy for iOS
+        run: >
+          cargo clippy --all-targets --all-features --target aarch64-apple-ios
+          -p analyzer-audio -p analyzer-ffi
+
+      # A staticlib is an archive, not a link, so both slices build here.
+      - name: Build the staticlib for device and simulator
+        run: |
+          cargo build -p analyzer-ffi --target aarch64-apple-ios
+          cargo build -p analyzer-ffi --target aarch64-apple-ios-sim

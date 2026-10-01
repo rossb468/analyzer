@@ -26,6 +26,13 @@ assert_no_alloc = "1.1"
 core-foundation-sys = "0.8"
 coreaudio-sys = "0.2"
 hound = "3.5"
+# iOS audio, in analyzer-audio only. Generated bindings in plain Rust, so the
+# iOS backend type-checks from any host without an Apple SDK installed.
+objc2 = "0.6"
+objc2-audio-toolbox = { version = "0.3", default-features = false }
+objc2-avf-audio = { version = "0.3", default-features = false }
+objc2-core-audio-types = { version = "0.3", default-features = false }
+objc2-foundation = { version = "0.3", default-features = false }
 realfft = "3.5"
 rtrb = "0.3"
 rustfft = "6.4"
