@@ -3,10 +3,12 @@
 Reference outputs recorded from the Rust build (`analyzer-cli` and the model
 crates) so the C++ port can be checked end to end after the Rust is deleted.
 
-- **Regenerate:** `bash tests/golden/generate.sh` (builds the CLI in release
-  mode, rewrites `fixtures/` from scratch). Needs a Rust toolchain; it is only
-  ever run while the Rust still exists. Once it is gone, `fixtures/` is the
-  record and is never regenerated.
+- **Regenerate:** only against the Rust core, which has been removed. The last
+  revision containing it is `e9a459b`: check that out and run
+  `bash tests/golden/generate.sh` (needs a Rust toolchain). On any later
+  revision `fixtures/` is the record, and the C++ golden tests in
+  `tests/model/golden_test.cpp` and `tests/cli/golden_test.cpp` hold the C++ to
+  it.
 - **Layout:** everything generated is under `fixtures/`; `generate.sh`,
   `rust/` (the fixture writer) and this file sit beside it.
 - **Size:** about 2.2 MB.

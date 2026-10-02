@@ -45,18 +45,3 @@ if(NOT MSVC AND "c_std_23" IN_LIST CMAKE_C_COMPILE_FEATURES)
         ${CMAKE_CURRENT_BINARY_DIR}/c23_enum_branch)
     target_compile_options(analyzer_ffi_c23_enum_branch PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
-
-# ---------------------------------------------------------------------------
-# include/analyzer.h is hand-maintained; while the Rust crate that used to
-# generate it still exists, it must stay declaration-for-declaration identical.
-# Exit status 77 means there is nothing to compare against (no cargo, or the
-# crate is gone), which ctest reports as skipped rather than passed.
-# ---------------------------------------------------------------------------
-
-find_package(Python3 COMPONENTS Interpreter)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME ffi_header_equivalence
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/header_test.py
-                     --header ${PROJECT_SOURCE_DIR}/include/analyzer.h)
-    set_tests_properties(ffi_header_equivalence PROPERTIES SKIP_RETURN_CODE 77)
-endif()

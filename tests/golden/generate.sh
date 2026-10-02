@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate every golden fixture from the Rust core, from scratch.
 #
+# Historical: the Rust core was removed after revision e9a459b. Run this from a
+# checkout of that revision; on later revisions the fixtures are the record.
+#
 #   bash tests/golden/generate.sh
 #
 # Output goes to tests/golden/fixtures/ (deleted first). Two runs on the same
