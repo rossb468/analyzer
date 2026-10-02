@@ -5,8 +5,10 @@
 #include "base/number_text.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -173,6 +175,19 @@ TEST(ParseU32, RejectsEverythingElse) {
     for (const char* text :
          {"", "+", "-1", "-0", "4294967296", "12ab", " 12", "1.0", "1e3", "++1"}) {
         EXPECT_FALSE(parse_u32(text).has_value()) << "'" << text << "'";
+    }
+}
+
+TEST(ParseUsize, AcceptsDigitsAndAPlus) {
+    EXPECT_EQ(parse_usize("4096"), std::optional<std::size_t>(4096));
+    EXPECT_EQ(parse_usize("+8"), std::optional<std::size_t>(8));
+    EXPECT_EQ(parse_usize("0"), std::optional<std::size_t>(0));
+}
+
+TEST(ParseUsize, RejectsSignsFractionsAndOverflow) {
+    for (const char* text :
+         {"", "+", "-1", "-0", "1.0", "1e3", " 1", "1 ", "abc", "99999999999999999999999"}) {
+        EXPECT_FALSE(parse_usize(text).has_value()) << "'" << text << "'";
     }
 }
 

@@ -5,8 +5,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "base/number_text.hpp"
 #include "cli/error.hpp"
-#include "cli/text.hpp"
 
 namespace analyzer::cli {
 

@@ -7,10 +7,10 @@
 #include <utility>
 #include <vector>
 
+#include "base/number_text.hpp"
 #include "base/numeric.hpp"
 #include "cli/error.hpp"
 #include "cli/source.hpp"
-#include "cli/text.hpp"
 #include "dsp/deconv.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/ir.hpp"
@@ -251,8 +251,8 @@ std::string from_files(const std::filesystem::path& stimulus_path,
     const audio::Source response = read_source(response_path);
 
     if (std::abs(stimulus.sample_rate - response.sample_rate) > 0.5) {
-        throw CliError("sample rate mismatch: stimulus is " + text::display(stimulus.sample_rate) +
-                       " Hz, response is " + text::display(response.sample_rate) + " Hz");
+        throw CliError("sample rate mismatch: stimulus is " + text::shortest(stimulus.sample_rate) +
+                       " Hz, response is " + text::shortest(response.sample_rate) + " Hz");
     }
 
     // Both files are reduced to their first channel. A stimulus is
@@ -271,7 +271,7 @@ std::string from_files(const std::filesystem::path& stimulus_path,
     line(out, "# swept measurement");
     line(out, "#   stimulus  " + stimulus_path.string());
     line(out, "#   response  " + response_path.string());
-    line(out, "#   rate      " + text::display(stimulus.sample_rate) + " Hz");
+    line(out, "#   rate      " + text::shortest(stimulus.sample_rate) + " Hz");
     line(out, "#");
 
     out += analyse(take_first(stimulus), take_first(response),

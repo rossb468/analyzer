@@ -37,10 +37,10 @@
 
 #include "audio/error.hpp"
 #include "audio/platform.hpp"
+#include "base/number_text.hpp"
 #include "cli/error.hpp"
 #include "cli/live.hpp"
 #include "cli/live_display.hpp"
-#include "cli/text.hpp"
 #include "engine/rt.hpp"
 
 namespace analyzer::cli {
@@ -137,7 +137,7 @@ engine::SpectrumFrame capture_inner(const LiveOptions& options) {
     const audio::StreamLatency latency = stream->latency();
 
     std::cerr << "capturing from " << device.name << " (" << channels << " ch @ "
-              << text::display(granted.sample_rate) << " Hz, " << granted.buffer_frames
+              << text::shortest(granted.sample_rate) << " Hz, " << granted.buffer_frames
               << " frame buffer, analysing channel " << options.channel << ")\n";
     std::cerr << "hardware latency: " << latency.input_frames << " frames in, "
               << latency.safety_offset_frames << " safety ("
@@ -221,7 +221,7 @@ std::string list_devices() {
         out += "    uid:      " + device.id.str() + "\n";
         out += "    channels: " + std::to_string(device.input_channels) + " in, " +
                std::to_string(device.output_channels) + " out\n";
-        out += "    rate:     " + text::display(device.default_sample_rate) + " Hz\n";
+        out += "    rate:     " + text::shortest(device.default_sample_rate) + " Hz\n";
         if (!device.supported_sample_rates.empty()) {
             out += "    supports: ";
             for (std::size_t i = 0; i < device.supported_sample_rates.size(); ++i) {

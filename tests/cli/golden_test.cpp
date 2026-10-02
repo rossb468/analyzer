@@ -30,7 +30,7 @@
 #include <string_view>
 #include <vector>
 
-#include "cli/text.hpp"
+#include "base/number_text.hpp"
 #include "subprocess.hpp"
 
 namespace analyzer::cli {

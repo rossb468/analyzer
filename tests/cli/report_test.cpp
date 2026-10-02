@@ -91,6 +91,8 @@ TEST(Report, NamesWindowsAndAveragingAsTheRustCoreDid) {
     EXPECT_EQ(describe(dsp::WindowKind::blackman_harris()), "BlackmanHarris");
     EXPECT_EQ(describe(dsp::WindowKind::flat_top()), "FlatTop");
     EXPECT_EQ(describe(dsp::WindowKind::tukey(0.25f)), "Tukey { alpha: 0.25 }");
+    // A whole number keeps its `.0`, as Rust's `{:?}` does.
+    EXPECT_EQ(describe(dsp::WindowKind::tukey(1.0f)), "Tukey { alpha: 1.0 }");
     EXPECT_EQ(describe(dsp::Averaging::none()), "None");
     EXPECT_EQ(describe(dsp::Averaging::infinite()), "Infinite");
     EXPECT_EQ(describe(dsp::Averaging::peak_hold()), "PeakHold");

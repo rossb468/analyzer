@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "base/number_text.hpp"
 #include "base/numeric.hpp"
-#include "cli/text.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/meter.hpp"
 #include "dsp/octave.hpp"
@@ -295,10 +295,10 @@ void ring_soak(std::string& out, double seconds) {
 std::string run_bench(double seconds) {
     std::string out;
     line(out, "analyzer benchmarks");
-    line(out, "  sample rate: " + text::display(kRate) + " Hz");
+    line(out, "  sample rate: " + text::shortest(kRate) + " Hz");
     line(out, "  audio per case: " + text::fixed(seconds, 1) + " s");
     line(out, "  duty cycle = CPU seconds per second of audio; target < " +
-                  text::display(kDutyTarget) + "\n");
+                  text::shortest(kDutyTarget) + "\n");
 
     spectrum_duty(out, seconds);
     transfer_duty(out, seconds);

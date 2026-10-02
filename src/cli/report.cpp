@@ -2,6 +2,7 @@
 
 #include <compare>
 
+#include "base/number_text.hpp"
 #include "cli/text.hpp"
 
 namespace analyzer::cli {
@@ -18,7 +19,7 @@ void line(std::string& out, const std::string& text) {
 std::string describe(dsp::WindowKind window) {
     std::string name = dsp::to_string(window.shape);
     if (window.shape == dsp::WindowKind::Shape::Tukey) {
-        name += " { alpha: " + text::debug(window.tukey_alpha) + " }";
+        name += " { alpha: " + debug_float(window.tukey_alpha) + " }";
     }
     return name;
 }
@@ -28,7 +29,7 @@ std::string describe(dsp::Averaging averaging) {
     switch (averaging.mode) {
         case Mode::None: return "None";
         case Mode::Exponential:
-            return "Exponential { alpha: " + text::debug(averaging.alpha) + " }";
+            return "Exponential { alpha: " + debug_float(averaging.alpha) + " }";
         case Mode::Linear: return "Linear { frames: " + std::to_string(averaging.frames) + " }";
         case Mode::Infinite: return "Infinite";
         case Mode::PeakHold: return "PeakHold";
@@ -43,7 +44,7 @@ std::string render(const engine::SpectrumFrame& frame, const Meta& meta,
 
     line(out, "# analyzer-cli spectrum");
     line(out, "# source: " + meta.source);
-    line(out, "# sample rate: " + text::display(meta.sample_rate) + " Hz");
+    line(out, "# sample rate: " + text::shortest(meta.sample_rate) + " Hz");
     line(out, "# channels: " + std::to_string(meta.channels) + " (analysed channel " +
                   std::to_string(meta.channel) + ")");
     line(out, "# fft size: " + std::to_string(meta.fft_size));

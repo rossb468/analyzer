@@ -15,6 +15,7 @@
 
 #include "audio/error.hpp"
 #include "audio/offline.hpp"
+#include "base/number_text.hpp"
 #include "cli/args.hpp"
 #include "cli/bench.hpp"
 #include "cli/error.hpp"
@@ -22,7 +23,6 @@
 #include "cli/measure.hpp"
 #include "cli/report.hpp"
 #include "cli/source.hpp"
-#include "cli/text.hpp"
 #include "dsp/spectrum.hpp"
 #include "engine/engine.hpp"
 #include "engine/ring.hpp"
@@ -75,7 +75,7 @@ std::string generate(const GenerateInput& input) {
                             static_cast<float>(input.seconds), input.depth);
     return "# wrote " + std::to_string(frames) + " frames (" +
            text::fixed(static_cast<double>(frames) / input.rate, 3) + " s) at " +
-           text::display(input.rate) + " Hz, " + std::string(model::as_key(input.depth)) + " to " +
+           text::shortest(input.rate) + " Hz, " + std::string(model::as_key(input.depth)) + " to " +
            input.out.string() + "\n";
 }
 
