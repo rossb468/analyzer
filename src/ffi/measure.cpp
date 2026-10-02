@@ -11,6 +11,7 @@
 
 #include "base/numeric.hpp"
 #include "dsp/deconv.hpp"
+#include "dsp/delay.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/ir.hpp"
 #include "ffi/internal.hpp"
@@ -166,7 +167,7 @@ extern "C" bool analyzer_session_finish_measurement(AnalyzerSession* session,
             run.sample_rate,
             analyzer::dsp::Signal::sweep(run.start_hz, run.end_hz, run.seconds, 1.0f,
                                          /*repeat=*/false),
-            analyzer::ffi::kGeneratorSeed);
+            analyzer::dsp::kDefaultSeed);
         std::vector<float> stimulus(run.frames, 0.0f);
         generator.fill(stimulus);
 
@@ -196,7 +197,7 @@ extern "C" bool analyzer_session_finish_measurement(AnalyzerSession* session,
 
         AnalyzerMeasureResult result{};
         result.arrival_ms = arrival_seconds * 1000.0f;
-        result.arrival_metres = arrival_seconds * analyzer::ffi::kSpeedOfSound;
+        result.arrival_metres = arrival_seconds * analyzer::dsp::kSpeedOfSound;
         result.peak_amplitude = impulse->peak_amplitude();
         result.edt = reverb.edt.value_or(0.0f);
         result.has_edt = reverb.edt.has_value();

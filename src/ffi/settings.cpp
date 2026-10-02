@@ -81,7 +81,7 @@ extern "C" bool analyzer_settings_save(const char* path, const AnalyzerSettings*
             std::filesystem::create_directories(parent, error);
             if (error) {
                 set_status(status, status_failure("creating " + parent.string() + ": " +
-                                                  analyzer::ffi::os_error_text(error.value())));
+                                                  analyzer::os_error_text(error.value())));
                 return false;
             }
         }

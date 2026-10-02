@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
-#include <system_error>
 
 #include "ffi/internal.hpp"
 
@@ -28,112 +27,6 @@ void set_status(AnalyzerStatus* out, const AnalyzerStatus& status) noexcept {
     if (out != nullptr) {
         *out = status;
     }
-}
-
-namespace {
-
-// The bytes of a string as unsigned values, which is what UTF-8 is defined on.
-std::uint8_t byte_at(std::string_view text, std::size_t index) noexcept {
-    return static_cast<std::uint8_t>(text[index]);
-}
-
-// One step of a UTF-8 decode: the bytes consumed, and whether they formed a
-// whole valid sequence.
-//
-// The accepted ranges are those of the Unicode standard's table of well-formed
-// byte sequences, which rules out overlong forms, surrogates and anything above
-// U+10FFFF. An invalid sequence consumes the longest prefix of one that was
-// valid so far, so a replacement character stands for exactly the bytes that
-// were wrong, which is how Rust's lossy conversion counts them.
-struct Step {
-    std::size_t length;
-    bool valid;
-};
-
-Step decode_step(std::string_view text, std::size_t at) noexcept {
-    const std::uint8_t lead = byte_at(text, at);
-    if (lead < 0x80) {
-        return {1, true};
-    }
-
-    std::size_t continuations = 0;
-    std::uint8_t first_low = 0x80;
-    std::uint8_t first_high = 0xBF;
-    if (lead >= 0xC2 && lead <= 0xDF) {
-        continuations = 1;
-    } else if (lead == 0xE0) {
-        continuations = 2;
-        first_low = 0xA0;
-    } else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) {
-        continuations = 2;
-    } else if (lead == 0xED) {
-        continuations = 2;
-        first_high = 0x9F;
-    } else if (lead == 0xF0) {
-        continuations = 3;
-        first_low = 0x90;
-    } else if (lead >= 0xF1 && lead <= 0xF3) {
-        continuations = 3;
-    } else if (lead == 0xF4) {
-        continuations = 3;
-        first_high = 0x8F;
-    } else {
-        return {1, false};
-    }
-
-    std::size_t consumed = 1;
-    for (std::size_t k = 0; k < continuations; ++k) {
-        if (at + consumed >= text.size()) {
-            return {consumed, false};
-        }
-        const std::uint8_t next = byte_at(text, at + consumed);
-        const std::uint8_t low = k == 0 ? first_low : std::uint8_t{0x80};
-        const std::uint8_t high = k == 0 ? first_high : std::uint8_t{0xBF};
-        if (next < low || next > high) {
-            return {consumed, false};
-        }
-        ++consumed;
-    }
-    return {consumed, true};
-}
-
-}  // namespace
-
-std::size_t utf8_floor(std::string_view text, std::size_t end) noexcept {
-    end = std::min(end, text.size());
-    // A continuation byte (10xxxxxx) means `end` is inside a character.
-    while (end > 0 && end < text.size() && (byte_at(text, end) & 0xC0) == 0x80) {
-        --end;
-    }
-    return end;
-}
-
-bool is_valid_utf8(std::string_view text) noexcept {
-    std::size_t at = 0;
-    while (at < text.size()) {
-        const Step step = decode_step(text, at);
-        if (!step.valid) {
-            return false;
-        }
-        at += step.length;
-    }
-    return true;
-}
-
-std::string utf8_lossy(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    std::size_t at = 0;
-    while (at < text.size()) {
-        const Step step = decode_step(text, at);
-        if (step.valid) {
-            out.append(text.substr(at, step.length));
-        } else {
-            out.append("\xEF\xBF\xBD");
-        }
-        at += step.length;
-    }
-    return out;
 }
 
 void write_c_string(std::span<char> dest, std::string_view text) noexcept {
@@ -157,11 +50,6 @@ std::optional<std::string> checked_utf8(const char* text) {
         return std::nullopt;
     }
     return std::string(view);
-}
-
-std::string os_error_text(int error) {
-    return std::error_code(error, std::generic_category()).message() + " (os error " +
-           std::to_string(error) + ")";
 }
 
 namespace {

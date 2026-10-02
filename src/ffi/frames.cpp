@@ -165,7 +165,7 @@ extern "C" uintptr_t analyzer_session_device_name(const AnalyzerSession* session
     return guard<std::uintptr_t>(0, [&] {
         const std::string& name = session->device_name;
         const std::size_t end =
-            analyzer::ffi::utf8_floor(name, std::min<std::size_t>(name.size(), capacity - 1));
+            analyzer::utf8_floor(name, std::min<std::size_t>(name.size(), capacity - 1));
         std::copy_n(name.begin(), end, out);
         out[end] = '\0';
         return end;

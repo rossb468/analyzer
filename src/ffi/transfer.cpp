@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "dsp/delay.hpp"
 #include "ffi/internal.hpp"
 #include "ffi/session.hpp"
 
@@ -72,7 +73,7 @@ extern "C" bool analyzer_session_transfer_info(AnalyzerSession* session,
         info.frames = session->engine.latest().transfer_frames;
         info.delay_frames = delay;
         info.delay_ms = seconds * 1000.0f;
-        info.delay_metres = seconds * analyzer::ffi::kSpeedOfSound;
+        info.delay_metres = seconds * analyzer::dsp::kSpeedOfSound;
         info.estimating = session->engine.delay_estimate_pending();
         *out = info;
         return true;
