@@ -51,7 +51,7 @@ float nearest(std::span<const float> values, float bin_spacing_hz, float hz, flo
 // `dense(span)` combines the bins that fall inside a column; `sparse(centre_hz)`
 // is used when none does. Both are template parameters, not std::function, so
 // they inline and the draw path never allocates.
-template <typename Dense, typename Sparse>
+template <class Dense, typename Sparse>
 void walk_columns(std::span<const float> values, float bin_spacing_hz, const FrequencyAxis& axis,
                   std::span<float> out, Dense dense, Sparse sparse) {
     const float column_width = axis.width() / static_cast<float>(out.size());

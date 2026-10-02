@@ -21,7 +21,7 @@ struct Difference {
 // The (frequency, value) with the largest magnitude. Of several equally large
 // the last wins, because which frequency is reported when two tie is part of
 // the report (std::max_element would pick the first).
-template <typename Select>
+template <class Select>
 Difference worst(const std::vector<Difference>& differences, Select select) {
     Difference best{0.0, 0.0};
     bool first = true;
@@ -35,7 +35,7 @@ Difference worst(const std::vector<Difference>& differences, Select select) {
     return best;
 }
 
-template <typename Select>
+template <class Select>
 double rms(const std::vector<Difference>& differences, Select select) {
     double sum = 0.0;
     for (const Difference& difference : differences) {
