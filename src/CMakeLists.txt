@@ -17,3 +17,8 @@ foreach(module base dsp cal plot model engine audio ffi cli)
         add_subdirectory(${module})
     endif()
 endforeach()
+
+# The single library the apps link. Only meaningful once the C ABI exists.
+if(APPLE AND TARGET analyzer_ffi)
+    include(${PROJECT_SOURCE_DIR}/cmake/AnalyzerBundle.cmake)
+endif()
