@@ -1,7 +1,7 @@
 // The operating system's words for a failed call.
 //
-// The harness and the C ABI both report file errors the way the Rust core did,
-// and the apps show the text to a person: `No such file or directory (os error
+// The harness and the C ABI both report file errors in the form the apps
+// already show to a person: `No such file or directory (os error
 // 2)`. The errno number rides along because the message alone is not enough to
 // search for.
 

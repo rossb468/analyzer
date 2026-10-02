@@ -5,9 +5,7 @@
 #
 # Sources are listed rather than globbed, for the same reason the audio module
 # lists its own: which live-capture implementation is compiled depends on the
-# platform, and the executable's main.cpp must stay out of the library. This is
-# the CMake counterpart of the Rust `#[cfg(target_os = "macos")] mod
-# live_coreaudio`.
+# platform, and the executable's main.cpp must stay out of the library.
 #
 #   macOS   live_coreaudio.cpp   captures through audio::default_backend()
 #   other   live_unsupported.cpp says there is no backend, plainly
@@ -45,10 +43,9 @@ add_executable(analyzer-cli main.cpp)
 target_link_libraries(analyzer-cli PRIVATE analyzer_cli_lib)
 analyzer_warnings(analyzer-cli)
 
-# The allocation trap is linked into debug builds only, mirroring the Rust
-# harness's debug-only #[global_allocator]. It is what makes the rt_section
+# The allocation trap is linked into debug builds only. It is what makes the rt_section
 # around every audio callback mean something: with it, an allocation inside a
 # callback aborts the process instead of quietly glitching. In release the
 # trap would only add a branch to every allocation, so the plain allocator is
-# used and rt_section merely counts, exactly as in the Rust.
+# used and rt_section merely counts.
 target_link_libraries(analyzer-cli PRIVATE $<$<CONFIG:Debug>:analyzer::alloc_trap>)

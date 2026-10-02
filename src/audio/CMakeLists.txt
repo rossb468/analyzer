@@ -1,7 +1,7 @@
 # The audio module. Unlike most modules its source list is explicit, not
 # globbed: the Apple backends must be compiled only for the Apple platform they
 # belong to, and a glob would pull coreaudio.cpp and ios.mm into every build.
-# This is the CMake counterpart of the Rust cfg(target_os = "...") attributes.
+# Which backend is built is decided here, by CMake, not by #if in a header.
 #
 # Which platform is which:
 #   iOS     CMAKE_SYSTEM_NAME is "iOS" (CMake also sets APPLE for it, which is

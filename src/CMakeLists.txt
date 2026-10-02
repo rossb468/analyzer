@@ -10,8 +10,8 @@
 #   ffi      the C ABI the apps call                            (everything)
 #   cli      the headless harness                               (most)
 #
-# A module directory that does not exist yet is skipped, which is what lets the
-# port from Rust land one module at a time.
+# A module directory that does not exist yet is skipped, so a module can be
+# added without touching this list's logic.
 foreach(module base dsp cal plot model engine audio ffi cli)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${module}/CMakeLists.txt)
         add_subdirectory(${module})
