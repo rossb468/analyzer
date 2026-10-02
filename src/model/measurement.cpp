@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "base/number_text.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::model {
 
@@ -14,7 +15,7 @@ std::vector<double> magnitude_db_of(const std::vector<Complex64>& bins) {
     out.reserve(bins.size());
     for (const Complex64& bin : bins) {
         const double magnitude = std::abs(bin);
-        out.push_back(magnitude > 0.0 ? 20.0 * std::log10(magnitude) : -200.0);
+        out.push_back(magnitude > 0.0 ? amplitude_to_db(magnitude) : kMagnitudeFloorDb);
     }
     return out;
 }

@@ -59,6 +59,9 @@ namespace analyzer::model {
 // A complex value in storage precision.
 using Complex64 = std::complex<double>;
 
+// What a bin of exactly zero reads as in decibels, rather than minus infinity.
+inline constexpr double kMagnitudeFloorDb = -200.0;
+
 // Identifier for a measurement within a session.
 struct MeasurementId {
     std::uint64_t value = 0;
@@ -137,7 +140,7 @@ struct PowerSpectrumData {
 struct TransferFunctionData {
     // Complex response per bin.
     std::vector<Complex64> bins;
-    // Coherence per bin, 0..=1. Kept alongside because a response without it
+    // Coherence per bin, 0 to 1. Kept alongside because a response without it
     // cannot be judged - there is no way to tell which parts to believe.
     std::vector<double> coherence;
     // Hertz between bins.
@@ -169,7 +172,7 @@ std::optional<double> bin_spacing_hz(const MeasurementData& data) noexcept;
 // Magnitude in decibels per bin, for frequency-domain data.
 //
 // A view, computed on demand. Deliberately not stored - see the storage rules.
-// A bin of exactly zero reads -200 rather than minus infinity.
+// A bin of exactly zero reads kMagnitudeFloorDb rather than minus infinity.
 std::optional<std::vector<double>> magnitude_db(const MeasurementData& data);
 
 // Phase in degrees per bin, for frequency-domain data that has any.

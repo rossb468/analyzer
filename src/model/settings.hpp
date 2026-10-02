@@ -128,7 +128,7 @@ struct Settings {
     // Never throws. An unknown key is ignored, an unparseable value leaves that
     // field at its default, and the result is passed through validated() so a
     // hand-edited file cannot produce an axis that divides by zero.
-    static Settings from_text(std::string_view text);
+    static Settings from_text(std::string_view contents);
 
     // Force the ranges into a shape the rest of the code can divide by.
     //
