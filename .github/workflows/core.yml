@@ -168,6 +168,15 @@ jobs:
       - name: Test
         run: ctest --test-dir build --build-config Debug --output-on-failure --parallel 4
 
+      # Optimised builds see warnings that Debug builds do not, because GCC
+      # runs some analyses only after inlining.
+      - name: Build and test Release
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --parallel
+          ctest --test-dir build-release --output-on-failure --parallel 4
+
       # AddressSanitizer and UndefinedBehaviorSanitizer over the whole suite.
       # Rust ruled out most of what these catch at compile time; C++ needs them
       # to run.

@@ -8,6 +8,10 @@
 # -Wdouble-promotion and -Wfloat-conversion matter more than usual here: DSP
 # runs in single precision on purpose, and an unnoticed `0.5` literal silently
 # promotes a whole expression to double and back again.
+#
+# -Wnull-dereference is deliberately absent. GCC computes it after inlining, so
+# at -O2 it fires inside libstdc++'s own stream code on correct callers, and a
+# warning that only appears in Release builds cannot be held at zero.
 function(analyzer_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -19,7 +23,7 @@ function(analyzer_warnings target)
             -Wall -Wextra -Wpedantic
             -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual
             -Wdouble-promotion -Wfloat-conversion -Wimplicit-fallthrough
-            -Wcast-align -Wnull-dereference)
+            -Wcast-align)
         if(ANALYZER_WERROR)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
