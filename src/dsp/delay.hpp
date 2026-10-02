@@ -42,6 +42,10 @@ enum class Weighting {
     None,
 };
 
+// Speed of sound in air, 343 m/s, the conventional figure at 20 C. Turns a
+// delay into a distance.
+inline constexpr float kSpeedOfSound = 343.0f;
+
 // What the finder concluded.
 struct DelayEstimate {
     // Delay in samples. Positive means the measurement arrived *after* the
@@ -54,11 +58,11 @@ struct DelayEstimate {
     // arrival gives tens or hundreds.
     float confidence = 0.0f;
 
-    // Distance the sound travelled, assuming 343 m/s.
+    // Distance the sound travelled, at kSpeedOfSound.
     //
     // Only meaningful for an acoustic path; an electrical loopback delay is not
     // a distance.
-    float metres() const noexcept { return seconds * 343.0f; }
+    float metres() const noexcept { return seconds * kSpeedOfSound; }
 
     friend constexpr bool operator==(const DelayEstimate&, const DelayEstimate&) = default;
 };

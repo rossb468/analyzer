@@ -27,6 +27,14 @@
 
 namespace analyzer::dsp {
 
+// The noise seed for every run that has to be reproducible: generated files,
+// swept measurements, the live stimulus.
+//
+// Two runs of the same command must produce the same bytes, or a parity
+// comparison cannot be repeated and a noise measurement cannot be compared
+// against itself.
+inline constexpr std::uint64_t kDefaultSeed = 0x5EED'5EED'5EED'5EEDull;
+
 // What to generate.
 //
 // A small value type rather than a bare enum because the shapes carry
