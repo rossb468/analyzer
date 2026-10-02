@@ -1,9 +1,5 @@
-/target/
-**/*.rs.bk
-Cargo.lock.bak
-
-# Generated at build time by cbindgen, never committed.
-/crates/analyzer-ffi/include/analyzer.h
+# Build trees
+/build/
 
 # macOS
 .DS_Store
@@ -12,11 +8,3 @@ Cargo.lock.bak
 xcuserdata/
 *.xcuserstate
 DerivedData/
-
-# macOS app build output
-/apps/macos/build/
-# Generated beside the header at build time
-/crates/analyzer-ffi/include/module.modulemap
-
-# C++ build trees
-/build/

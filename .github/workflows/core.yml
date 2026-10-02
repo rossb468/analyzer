@@ -1,44 +1,34 @@
 name: Core
 
-# The portable half: every crate under crates/ plus the headless harness.
-#
-# Runs on three platforms deliberately. The core is meant to be buildable and
-# testable without an audio stack, a window server or an Apple SDK, and the only
-# way that claim stays true is if a machine checks it on every push. Linux is
-# where it breaks first, because it has none of the three.
+# The whole core, on the three platforms it has to build on. It is meant to be
+# buildable and testable without an audio stack, a window server or an Apple
+# SDK, and the only way that claim stays true is if a machine checks it on
+# every push. Linux is where it breaks first, because it has none of the three.
 on:
   push:
     branches: [main]
     paths:
-      - 'crates/**'
-      - 'tools/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
       - 'src/**'
+      - 'include/**'
       - 'tests/**'
       - 'third_party/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'check.sh'
+      - '.clang-format'
       - '.github/workflows/core.yml'
   pull_request:
     paths:
-      - 'crates/**'
-      - 'tools/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
       - 'src/**'
+      - 'include/**'
       - 'tests/**'
       - 'third_party/**'
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'check.sh'
+      - '.clang-format'
       - '.github/workflows/core.yml'
   workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -55,98 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: core-${{ matrix.os }}
-
       # Formatting is platform-independent, so checking it once is enough.
-      - name: Format
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all --check
-
-      # The whole workspace, the C ABI included. analyzer-ffi reaches audio
-      # hardware only through analyzer_audio::default_backend(), which is an
-      # empty stand-in where no platform backend exists, so it must build and
-      # pass here too. That is what keeps a client port from starting with a
-      # core that does not compile on its platform.
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features
-
-      - name: Test
-        run: cargo test --workspace --all-features
-
-      # The allocation trap only proves anything when it actually runs. A debug
-      # build registers the tracking allocator, so if the audio callback
-      # allocates the process aborts and this step fails - rather than the
-      # violation shipping and surfacing as an intermittent click in the field.
-      - name: Real-time safety harness
-        run: cargo run -p analyzer-cli -- --sine 1000 --seconds 1 --window flattop --peak
-
-      # A known-answer check on the whole chain: an on-bin sine at half scale
-      # must read -6.02 dBFS. Catches an FFT scaling, window correction or dBFS
-      # reference error that unit tests could all individually pass through.
-      #
-      # Bash on every runner, Windows included, so this is written once.
-      - name: Known-answer level check
-        shell: bash
-        run: |
-          level=$(cargo run -q -p analyzer-cli -- \
-            --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak \
-            | grep -v '^#' | cut -f2)
-          echo "measured: $level dBFS (expected -6.0206)"
-          awk -v got="$level" 'BEGIN { exit (got - -6.0206 < 0.02 && got - -6.0206 > -0.02) ? 0 : 1 }'
-
-      # End to end over a synthetic room with a known geometry: proves the sweep,
-      # deconvolution, gating and decay chain on a platform with no audio device.
-      - name: Swept measurement
-        run: cargo run --release -p analyzer-cli -- --measure-demo
-
-  # The iOS backend and the C ABI as the iPhone client links them. The bindings
-  # are generated Rust rather than bindgen output, so this needs no Apple SDK
-  # and runs on Linux - which is also the proof that nothing iOS-specific
-  # leaked out of its cfg into a crate that has to build everywhere.
-  ios:
-    name: ios (type-check)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: aarch64-apple-ios, aarch64-apple-ios-sim
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: core-ios
-
-      - name: Clippy for iOS
-        run: >
-          cargo clippy --all-targets --all-features --target aarch64-apple-ios
-          -p analyzer-audio -p analyzer-ffi
-
-      # A staticlib is an archive, not a link, so both slices build here.
-      - name: Build the staticlib for device and simulator
-        run: |
-          cargo build -p analyzer-ffi --target aarch64-apple-ios
-          cargo build -p analyzer-ffi --target aarch64-apple-ios-sim
-
-  # The C++ core, being ported from the Rust above and run beside it until the
-  # port is complete. Same three platforms, for the same reason.
-  cpp:
-    name: cpp (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Format
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -169,8 +68,24 @@ jobs:
       - name: Build
         run: cmake --build build --config Debug --parallel
 
+      # The suite includes the allocation trap's own tests, so a debug build
+      # here also proves the audio callback paths do not allocate.
       - name: Test
         run: ctest --test-dir build --build-config Debug --output-on-failure --parallel 4
+
+      # A known-answer check on the whole chain: an on-bin sine at half scale
+      # must read -6.02 dBFS. Catches an FFT scaling, window correction or dBFS
+      # reference error that unit tests could all individually pass through.
+      # Bash on every runner, Windows included, so this is written once.
+      - name: Known-answer level check
+        shell: bash
+        run: |
+          cli=build/src/cli/analyzer-cli
+          [[ -x "$cli" ]] || cli=build/src/cli/Debug/analyzer-cli.exe
+          level=$("$cli" --sine 996.09375 --amplitude 0.5 --seconds 1 --window flattop --peak \
+            | grep -v '^#' | cut -f2)
+          echo "measured: $level dBFS (expected -6.0206)"
+          awk -v got="$level" 'BEGIN { exit (got - -6.0206 < 0.02 && got - -6.0206 > -0.02) ? 0 : 1 }'
 
       # The library the iPhone app links, cross-compiled for its oldest
       # supported iOS. The only place the core's Objective-C++ audio backend is
@@ -201,3 +116,12 @@ jobs:
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DANALYZER_SANITIZE=address
           cmake --build build-asan --parallel
           ctest --test-dir build-asan --output-on-failure --parallel 4
+
+      # ThreadSanitizer over the suite: the ring, the triple buffer and the
+      # engine's worker are where a missing memory order would hide.
+      - name: Test under TSan
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DANALYZER_SANITIZE=thread
+          cmake --build build-tsan --parallel
+          ctest --test-dir build-tsan --output-on-failure --parallel 4
