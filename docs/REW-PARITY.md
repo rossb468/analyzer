@@ -17,9 +17,15 @@ Everything needed is in the harness. What is not automated is REW itself.
 
 ## 1. Generate the test signals
 
+Build the harness once, in Release (the analysis is the same in Debug, only
+slower), and point `A` at it from the repository root:
+
 ```bash
+cmake -S . -B build/rel -DCMAKE_BUILD_TYPE=Release
+cmake --build build/rel -j8 --target analyzer-cli
+A="$PWD/build/rel/src/cli/analyzer-cli"
+
 mkdir -p /tmp/parity && cd /tmp/parity
-A="cargo run --release -q -p analyzer-cli --"
 
 # On-bin sine: isolates absolute scaling and the reference convention.
 # 996.09375 Hz is bin 85 exactly at 4096 points and 48 kHz, so there is no
