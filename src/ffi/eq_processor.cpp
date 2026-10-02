@@ -7,7 +7,7 @@ namespace analyzer::ffi {
 EqCoefficients EqCoefficients::from_equaliser(std::uint64_t generation, const dsp::Equaliser& eq) {
     EqCoefficients out;
     out.generation = generation;
-    out.trim = std::pow(10.0f, eq.preamp_db() / 20.0f);
+    out.trim = db_to_amplitude(eq.preamp_db());
     for (const dsp::FilterBand& band : eq.bands()) {
         if (out.count == kMaxEqBands) {
             break;

@@ -1,7 +1,7 @@
 // Stable C ABI surface consumed by the platform user interfaces.
 //
 // Shape of the boundary
-// ---------------------
+//
 // Two kinds of traffic cross here and they have opposite needs, so they use
 // different mechanisms:
 //
@@ -19,7 +19,7 @@
 // read.
 //
 // Rules for every entry point
-// ---------------------------
+//
 // - Null pointers are tolerated and become a failure return, never a crash.
 // - Exceptions are caught. Unwinding into C or Swift is undefined behaviour,
 //   and a UI thread should not die because analysis hit an edge case. Every
@@ -36,7 +36,6 @@
 #pragma once
 
 #include <cmath>
-#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -112,9 +111,9 @@ void set_status(AnalyzerStatus* out, const AnalyzerStatus& status) noexcept;
 
 // Run `body` like `guard`, and also report a thrown exception through `status`.
 //
-// The Rust caught panics and left the status untouched, which a caller that
-// had not initialised it would read as garbage. An exception that escapes the
-// body here is reported with its message instead.
+// A bare guard() leaves the status untouched when the body throws, which a
+// caller that had not initialised it would read as garbage. An exception that
+// escapes the body here is reported with its message instead.
 template <class R, class F>
 R guard_status(AnalyzerStatus* status, R fallback, F&& body) noexcept {
     try {
@@ -174,12 +173,6 @@ FileRead read_text_file(const std::string& path);
 // is enforced here rather than trusted to the caller.
 inline float amplitude_from_db(float level_db) noexcept {
     return db_to_amplitude(std::fmin(level_db, 0.0f));
-}
-
-// IEEE total order, which is what a comparison of absolute values wants when a
-// NaN may be among them.
-inline bool total_less(float a, float b) noexcept {
-    return std::strong_order(a, b) < 0;
 }
 
 // `value` limited to [low, high], passing NaN through. Throws when the bounds

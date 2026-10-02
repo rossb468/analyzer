@@ -10,6 +10,7 @@
 #include <limits>
 
 #include "base/numeric.hpp"
+#include "base/peak.hpp"
 #include "dsp/deconv.hpp"
 #include "dsp/delay.hpp"
 #include "dsp/generator.hpp"
@@ -32,12 +33,7 @@ std::size_t peak_index(std::span<const float> samples) {
     if (samples.empty()) {
         return 0;
     }
-    const auto less = [](float a, float b) {
-        return analyzer::ffi::total_less(std::fabs(a), std::fabs(b));
-    };
-    // Searching backwards makes the first maximum found the last in time.
-    const auto found = std::max_element(samples.rbegin(), samples.rend(), less);
-    return samples.size() - 1 - static_cast<std::size_t>(found - samples.rbegin());
+    return analyzer::last_max_index(samples, [](float sample) { return std::fabs(sample); });
 }
 
 }  // namespace

@@ -112,7 +112,7 @@ extern "C" bool analyzer_session_distortion(AnalyzerSession* session, float fund
         session->power.clear();
         session->power.reserve(frame.bins.size());
         for (const float db : frame.bins) {
-            session->power.push_back(std::pow(10.0f, db / 10.0f) / 2.0f);
+            session->power.push_back(analyzer::db_to_power(db) / 2.0f);
         }
         const float spacing = frame.bin_spacing_hz;
 
