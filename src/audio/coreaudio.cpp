@@ -474,7 +474,7 @@ OSStatus io_proc(AudioObjectID /*device*/, const AudioTimeStamp* /*now*/,
                  const AudioBufferList* input, const AudioTimeStamp* /*input_time*/,
                  AudioBufferList* output, const AudioTimeStamp* /*output_time*/,
                  void* client) noexcept {
-    if (client == nullptr || input == nullptr) {
+    if (client == nullptr) {
         return 0;
     }
     // `client` is the pointer handed to AudioDeviceCreateIOProcID, which points
@@ -485,7 +485,12 @@ OSStatus io_proc(AudioObjectID /*device*/, const AudioTimeStamp* /*now*/,
     const std::size_t channels = state.selected.size();
     const std::size_t output_channels = state.outputs.size();
 
-    std::size_t frames = gather_input(input, state.selected, state.interleaved);
+    // The HAL passes no input list at all to an IOProc on a device with no
+    // input streams. The Rust original returned early in that case, which made
+    // the output-only fallback below unreachable and would have played silence
+    // forever; a missing list is simply no input.
+    std::size_t frames =
+        input != nullptr ? gather_input(input, state.selected, state.interleaved) : 0;
     if (frames == 0) {
         // An output-only stream still has work to do, so fall back to what the
         // output side is asking for rather than returning early.
