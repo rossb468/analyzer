@@ -94,8 +94,7 @@ TEST(AudioCallback, ClosuresAreCallbacks) {
     takes_callback(*callback);
 }
 
-// Not in the Rust suite. Rust closures were callbacks by a blanket impl with no
-// allocation anywhere; here the wrapper is an object, so the guarantee that
+// The wrapper is an object allocated at setup, so the guarantee that
 // invoking it is allocation-free has to be proved rather than assumed. The test
 // binary links the allocation trap, which aborts inside an rt_section on any
 // allocation - so reaching the assertions at all is the result.

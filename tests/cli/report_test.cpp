@@ -99,8 +99,8 @@ TEST(Report, NamesWindowsAndAveragingAsTheRustCoreDid) {
     EXPECT_EQ(describe(dsp::Averaging::exponential(0.2f)), "Exponential { alpha: 0.2 }");
 }
 
-// Rust's max_by keeps the last of several equal maxima. A silent spectrum is
-// all equal, so the answer is its top bin rather than DC.
+// The last of several equal maxima wins (std::max_element would pick the first). A silent spectrum
+// is all equal, so the answer is its top bin rather than DC.
 TEST(Report, PeakOfAFlatSpectrumIsTheLastBin) {
     engine::SpectrumFrame silent = frame();
     silent.bins.assign(4, -200.0f);
