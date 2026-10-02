@@ -23,8 +23,8 @@ inline constexpr float kSilenceDb = -160.0f;
 // kSilenceDb when there is no power at all.
 float broadband_db(std::span<const float> bins);
 
-// The loudest bin and its level. The last of several equal bins wins, as the
-// Rust `max_by` did. An empty spectrum gives bin 0 at kSilenceDb.
+// The loudest bin and its level. The last of several equal bins wins (see
+// base/peak.hpp). An empty spectrum gives bin 0 at kSilenceDb.
 std::pair<std::size_t, float> peak_bin(std::span<const float> bins);
 
 // A 40-column meter spanning -90 to 0 dBFS, clamped at both ends.

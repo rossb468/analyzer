@@ -1,9 +1,8 @@
 #include "cli/report.hpp"
 
-#include <compare>
-
 #include "base/lines.hpp"
 #include "base/number_text.hpp"
+#include "base/peak.hpp"
 #include "cli/text.hpp"
 
 namespace analyzer::cli {
@@ -64,16 +63,10 @@ std::string render(const engine::SpectrumFrame& frame, const Meta& meta,
     };
 
     if (peak_only) {
-        // Rust's max_by keeps the last of several equal maxima, and compares
-        // with total_cmp, which orders -0.0 below 0.0 and NaN above everything.
-        // Both matter when a whole spectrum is silence: the answer is the top bin.
+        // The last of several equal maxima, so a spectrum that is all silence
+        // reports its top bin; see base/peak.hpp.
         if (!frame.bins.empty()) {
-            std::size_t loudest = 0;
-            for (std::size_t bin = 1; bin < frame.bins.size(); ++bin) {
-                if (std::strong_order(frame.bins[bin], frame.bins[loudest]) >= 0) {
-                    loudest = bin;
-                }
-            }
+            const std::size_t loudest = last_max_index(frame.bins);
             row(loudest, frame.bins[loudest]);
         }
         return out;

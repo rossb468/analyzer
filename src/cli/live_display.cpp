@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <compare>
 
 #include "base/numeric.hpp"
+#include "base/peak.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::cli {
 
@@ -12,21 +13,16 @@ float broadband_db(std::span<const float> bins) {
     // write_db_fs stores 10*log10(2*power), so power is 10^(db/10)/2.
     float total = 0.0f;
     for (const float db : bins) {
-        total += std::pow(10.0f, db / 10.0f) / 2.0f;
+        total += db_to_power(db) / 2.0f;
     }
-    return total > 0.0f ? 10.0f * std::log10(2.0f * total) : kSilenceDb;
+    return total > 0.0f ? power_to_db(2.0f * total) : kSilenceDb;
 }
 
 std::pair<std::size_t, float> peak_bin(std::span<const float> bins) {
     if (bins.empty()) {
         return {0, kSilenceDb};
     }
-    std::size_t loudest = 0;
-    for (std::size_t bin = 1; bin < bins.size(); ++bin) {
-        if (std::strong_order(bins[bin], bins[loudest]) >= 0) {
-            loudest = bin;
-        }
-    }
+    const std::size_t loudest = last_max_index(bins);
     return {loudest, bins[loudest]};
 }
 
