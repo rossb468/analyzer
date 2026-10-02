@@ -15,7 +15,7 @@
 
 set(ANALYZER_BUNDLE_LIBRARIES
     analyzer_ffi analyzer_audio analyzer_engine analyzer_model
-    analyzer_plot analyzer_cal analyzer_dsp kissfft)
+    analyzer_plot analyzer_cal analyzer_dsp analyzer_base kissfft)
 
 set(bundle_output ${CMAKE_BINARY_DIR}/lib/libanalyzer.a)
 set(bundle_inputs "")
