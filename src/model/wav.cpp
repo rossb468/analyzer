@@ -212,7 +212,7 @@ std::vector<float> render(dsp::Signal signal, float sample_rate, float seconds) 
         throw BadParameterError("that is more audio than a WAV file can hold");
     }
 
-    dsp::Generator generator(sample_rate, signal, kGeneratorSeed);
+    dsp::Generator generator(sample_rate, signal, dsp::kDefaultSeed);
     std::vector<float> out(static_cast<std::size_t>(frames), 0.0f);
     generator.fill(out);
     return out;
