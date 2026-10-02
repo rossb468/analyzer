@@ -53,7 +53,7 @@ public:
     // vendor files routinely carry stray headers and trailing junk. That is why
     // this does not throw: there is no input it rejects, and a file with no
     // usable rows is simply a flat curve.
-    static ResponseCurve parse(std::string_view text);
+    static ResponseCurve parse(std::string_view contents);
 
     // Whether this curve would change anything.
     bool is_flat() const noexcept { return points_.empty(); }

@@ -60,12 +60,12 @@ ResponseCurve::ResponseCurve(std::vector<CurvePoint> points) : points_(std::move
     points_.erase(duplicates.begin(), duplicates.end());
 }
 
-ResponseCurve ResponseCurve::parse(std::string_view text) {
+ResponseCurve ResponseCurve::parse(std::string_view contents) {
     std::vector<CurvePoint> points;
-    while (!text.empty()) {
-        const auto newline = text.find('\n');
-        std::string_view line = trim(text.substr(0, newline));
-        text.remove_prefix(newline == std::string_view::npos ? text.size() : newline + 1);
+    while (!contents.empty()) {
+        const auto newline = contents.find('\n');
+        std::string_view line = trim(contents.substr(0, newline));
+        contents.remove_prefix(newline == std::string_view::npos ? contents.size() : newline + 1);
 
         if (line.empty() || is_comment(line)) {
             continue;
