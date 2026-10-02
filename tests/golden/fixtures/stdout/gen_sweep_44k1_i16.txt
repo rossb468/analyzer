@@ -1,0 +1,1 @@
+# wrote 11025 frames (0.250 s) at 44100 Hz, i16 to wav/sweep_44k1_i16.wav

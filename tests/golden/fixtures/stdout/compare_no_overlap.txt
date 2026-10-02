@@ -1,0 +1,5 @@
+# spectrum comparison
+# band: 30000.0 Hz to 40000.0 Hz
+# points: 0 (0 interpolated)
+#
+# nothing overlapped. Check the two files cover the same band.

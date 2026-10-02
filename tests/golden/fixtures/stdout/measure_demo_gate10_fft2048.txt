@@ -1,0 +1,46 @@
+# synthetic room measurement
+#
+# constructed:
+#   direct arrival     10.00 ms (3.43 m)
+#   reflection         +6.00 ms at 50%
+#   reflection         +11.00 ms at 35%
+#   reflection         +18.00 ms at 25%
+#   reverberation      0.450 s
+#
+# measured:
+#   direct arrival     10.00 ms (3.43 m)
+#   impulse length     113280 samples (2.360 s)
+#   reflection         +6.00 ms at 47%
+#   reflection         +11.00 ms at 33%
+#   reflection         +17.98 ms at 24%
+#   EDT                0.141 s
+#   T20                0.369 s
+#   T30                0.421 s
+#   agreement          66.4% (estimates disagree - the decay is not a straight line)
+#
+# gated response: 11.0 ms window, valid above 91 Hz
+# frequency_hz	level_db	trustworthy
+20.0	3.95	no
+27.0	3.95	no
+36.5	1.76	no
+49.2	1.76	no
+66.5	-1.91	no
+89.8	-3.27	no
+121.2	-0.04	yes
+163.7	2.99	yes
+221.1	-0.25	yes
+298.5	2.08	yes
+403.1	-1.47	yes
+544.3	1.69	yes
+734.9	-0.14	yes
+992.4	3.69	yes
+1340.0	4.46	yes
+1809.5	3.52	yes
+2443.4	-2.86	yes
+3299.3	1.90	yes
+4455.1	1.14	yes
+6015.8	4.04	yes
+8123.2	2.53	yes
+10968.8	2.19	yes
+14811.4	3.87	yes
+20000.0	3.84	yes

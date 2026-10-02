@@ -1,0 +1,1 @@
+# wrote 22050 frames (0.500 s) at 44100 Hz, i24 to wav/sine440_44k1_i24.wav

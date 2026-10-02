@@ -1,0 +1,59 @@
+analyzer-cli - headless spectrum analysis harness
+
+USAGE:
+    analyzer-cli [OPTIONS] <input.wav>
+    analyzer-cli [OPTIONS] --sine <hz>
+    analyzer-cli [OPTIONS] --live [seconds]
+    analyzer-cli --list-devices
+
+INPUT:
+    <input.wav>          WAV file (16/24/32-bit integer or 32-bit float)
+    --sine <hz>          Synthesise a sine instead of reading a file
+    --live [seconds]     Capture from hardware (default 5 seconds)
+    --list-devices       Show every audio device and exit
+    --bench [seconds]    Measure analysis throughput and ring behaviour (default 2)
+
+SWEPT MEASUREMENT:
+    --measure <a> <b>    Deconvolve response <b> against stimulus <a>
+    --measure-demo       Build a synthetic room and measure it end to end
+    --gate <ms>          Gate length for the quasi-anechoic response (default 5)
+
+SIGNAL GENERATION:
+    --generate <kind>    Write a test signal: sine | pink | white | sweep
+    --out <file.wav>     Where to write it (required with --generate)
+    --depth <d>          i16 | i24 | f32 (default f32)
+    --hz <n>             Sine frequency, or sweep start (default 1000 / 20)
+    --hz-end <n>         Sweep end frequency (default 20000)
+
+COMPARISON:
+    --compare <a> <b>    Compare two frequency/level exports, <a> against <b>
+    --from-hz <n>        Low end of the compared band (default 20)
+    --to-hz <n>          High end of the compared band (default 20000)
+    --tolerance <db>     Fail unless the shapes agree this closely
+
+ANALYSIS:
+    --fft <n>            FFT size, even (default 4096)
+    --window <name>      rect | hann | bh | flattop | tukey (default hann)
+    --overlap <pct>      0 | 50 | 75 | 87 (default 75)
+    --average <mode>     none | infinite | peak (default infinite)
+    --channel <n>        Which input channel to analyse (default 0)
+    --block <frames>     Callback block size (default 128)
+
+LIVE:
+    --device <uid>       Capture device UID (default: system default input)
+    --no-meter           Suppress the running level meter
+
+SYNTHESIS:
+    --rate <hz>          Sample rate for --sine (default 48000)
+    --seconds <s>        Duration for --sine (default 1.0)
+    --amplitude <a>      Peak amplitude for --sine (default 0.5)
+
+OUTPUT:
+    --min-db <db>        Omit bins quieter than this
+    --peak               Print only the loudest bin
+    --out <path>         Write to a file instead of stdout
+    -h, --help           This text
+
+Levels are dBFS with 0 dBFS = full-scale sine. Phase is not emitted: a
+single-channel spectrum has no phase reference, and padding the column with
+zeros would be fabricating data.

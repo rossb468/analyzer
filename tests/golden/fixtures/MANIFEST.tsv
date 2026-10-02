@@ -1,0 +1,63 @@
+id	exit	class	stdout	stderr	artifact	args
+gen_sine_i16	0	wavgen	stdout/gen_sine_i16.txt	-	wav/sine_i16.wav	--generate sine --depth i16 --seconds 0.5 --out wav/sine_i16.wav
+gen_sine_i24	0	wavgen	stdout/gen_sine_i24.txt	-	wav/sine_i24.wav	--generate sine --depth i24 --seconds 0.5 --out wav/sine_i24.wav
+gen_sine_f32	0	wavgen	stdout/gen_sine_f32.txt	-	wav/sine_f32.wav	--generate sine --depth f32 --seconds 0.5 --out wav/sine_f32.wav
+gen_pink_i16	0	wavgen	stdout/gen_pink_i16.txt	-	wav/pink_i16.wav	--generate pink --depth i16 --seconds 0.5 --out wav/pink_i16.wav
+gen_pink_i24	0	wavgen	stdout/gen_pink_i24.txt	-	wav/pink_i24.wav	--generate pink --depth i24 --seconds 0.5 --out wav/pink_i24.wav
+gen_pink_f32	0	wavgen	stdout/gen_pink_f32.txt	-	wav/pink_f32.wav	--generate pink --depth f32 --seconds 0.5 --out wav/pink_f32.wav
+gen_white_i16	0	wavgen	stdout/gen_white_i16.txt	-	wav/white_i16.wav	--generate white --depth i16 --seconds 0.5 --out wav/white_i16.wav
+gen_white_i24	0	wavgen	stdout/gen_white_i24.txt	-	wav/white_i24.wav	--generate white --depth i24 --seconds 0.5 --out wav/white_i24.wav
+gen_white_f32	0	wavgen	stdout/gen_white_f32.txt	-	wav/white_f32.wav	--generate white --depth f32 --seconds 0.5 --out wav/white_f32.wav
+gen_sweep_i16	0	wavgen	stdout/gen_sweep_i16.txt	-	wav/sweep_i16.wav	--generate sweep --depth i16 --seconds 0.5 --out wav/sweep_i16.wav
+gen_sweep_i24	0	wavgen	stdout/gen_sweep_i24.txt	-	wav/sweep_i24.wav	--generate sweep --depth i24 --seconds 0.5 --out wav/sweep_i24.wav
+gen_sweep_f32	0	wavgen	stdout/gen_sweep_f32.txt	-	wav/sweep_f32.wav	--generate sweep --depth f32 --seconds 0.5 --out wav/sweep_f32.wav
+gen_sine440_44k1_i24	0	wavgen	stdout/gen_sine440_44k1_i24.txt	-	wav/sine440_44k1_i24.wav	--generate sine --hz 440 --rate 44100 --amplitude 0.25 --depth i24 --seconds 0.5 --out wav/sine440_44k1_i24.wav
+gen_sweep_100_5000_i16	0	wavgen	stdout/gen_sweep_100_5000_i16.txt	-	wav/sweep_100_5000_i16.wav	--generate sweep --hz 100 --hz-end 5000 --depth i16 --seconds 0.5 --out wav/sweep_100_5000_i16.wav
+gen_sweep_1s_f32	0	wavgen	stdout/gen_sweep_1s_f32.txt	-	wav/sweep_1s_f32.wav	--generate sweep --seconds 1 --depth f32 --out wav/sweep_1s_f32.wav
+gen_sweep_44k1_i16	0	wavgen	stdout/gen_sweep_44k1_i16.txt	-	wav/sweep_44k1_i16.wav	--generate sweep --rate 44100 --seconds 0.25 --depth i16 --out wav/sweep_44k1_i16.wav
+gen_err_unknown_signal	1	exact	stdout/gen_err_unknown_signal.txt	stderr/gen_err_unknown_signal.txt	-	--generate triangle --out wav/never.wav
+gen_err_no_out	1	exact	stdout/gen_err_no_out.txt	stderr/gen_err_no_out.txt	-	--generate sine
+rta_pink_f32_default	0	spectrum	stdout/rta_pink_f32_default.txt	-	-	wav/pink_f32.wav
+rta_pink_f32_block1000	0	spectrum	stdout/rta_pink_f32_block1000.txt	-	-	--block 1000 wav/pink_f32.wav
+rta_pink_f32_fft1024_flattop_ov50	0	spectrum	stdout/rta_pink_f32_fft1024_flattop_ov50.txt	-	-	--fft 1024 --window flattop --overlap 50 wav/pink_f32.wav
+rta_pink_i24_default	0	spectrum	stdout/rta_pink_i24_default.txt	-	-	wav/pink_i24.wav
+rta_pink_i16_default	0	spectrum	stdout/rta_pink_i16_default.txt	-	-	wav/pink_i16.wav
+rta_pink_i24_tukey_ov0_peakhold	0	spectrum	stdout/rta_pink_i24_tukey_ov0_peakhold.txt	-	-	--fft 2048 --window tukey --overlap 0 --average peak wav/pink_i24.wav
+rta_white_f32_default	0	spectrum	stdout/rta_white_f32_default.txt	-	-	wav/white_f32.wav
+rta_white_i16_fft2048_bh_avgnone	0	spectrum	stdout/rta_white_i16_fft2048_bh_avgnone.txt	-	-	--fft 2048 --window bh --average none wav/white_i16.wav
+rta_sweep_f32_fft8192_rect_ov87	0	spectrum	stdout/rta_sweep_f32_fft8192_rect_ov87.txt	-	-	--fft 8192 --window rect --overlap 87 wav/sweep_f32.wav
+rta_sine_f32_min90	0	spectrum	stdout/rta_sine_f32_min90.txt	-	-	--min-db -90 wav/sine_f32.wav
+rta_sine_i16_fft2048_flattop	0	spectrum	stdout/rta_sine_i16_fft2048_flattop.txt	-	-	--fft 2048 --window flattop wav/sine_i16.wav
+peak_sine_i16_hann	0	spectrum	stdout/peak_sine_i16_hann.txt	-	-	--peak wav/sine_i16.wav
+peak_sine_i24_rect	0	spectrum	stdout/peak_sine_i24_rect.txt	-	-	--peak --window rect wav/sine_i24.wav
+peak_sine_f32_fft8192_flattop	0	spectrum	stdout/peak_sine_f32_fft8192_flattop.txt	-	-	--peak --fft 8192 --window flattop wav/sine_f32.wav
+peak_sine440_44k1_bh	0	spectrum	stdout/peak_sine440_44k1_bh.txt	-	-	--peak --window bh wav/sine440_44k1_i24.wav
+rta_out_flag	0	spectrum	stdout/rta_out_flag.txt	stderr/rta_out_flag.txt	files/peak_out.txt	--peak --out files/peak_out.txt wav/sine_f32.wav
+sine_1000_default	0	spectrum	stdout/sine_1000_default.txt	-	-	--sine 1000
+sine_440_44k1_bh_fft2048	0	spectrum	stdout/sine_440_44k1_bh_fft2048.txt	-	-	--sine 440 --rate 44100 --seconds 0.5 --amplitude 0.25 --window bh --fft 2048
+sine_onbin_peak_rect	0	spectrum	stdout/sine_onbin_peak_rect.txt	-	-	--sine 996.09375 --peak --window rect
+sine_onbin_peak_hann	0	spectrum	stdout/sine_onbin_peak_hann.txt	-	-	--sine 996.09375 --peak --window hann
+sine_onbin_peak_bh	0	spectrum	stdout/sine_onbin_peak_bh.txt	-	-	--sine 996.09375 --peak --window bh
+sine_onbin_peak_flattop	0	spectrum	stdout/sine_onbin_peak_flattop.txt	-	-	--sine 996.09375 --peak --window flattop
+sine_onbin_peak_tukey	0	spectrum	stdout/sine_onbin_peak_tukey.txt	-	-	--sine 996.09375 --peak --window tukey
+err_short_source	1	exact	stdout/err_short_source.txt	stderr/err_short_source.txt	-	--sine 1000 --seconds 0.05
+err_unknown_window	1	exact	stdout/err_unknown_window.txt	stderr/err_unknown_window.txt	-	--sine 1000 --window nope
+err_odd_fft	1	exact	stdout/err_odd_fft.txt	stderr/err_odd_fft.txt	-	--sine 1000 --fft 1001
+err_channel_out_of_range	1	exact	stdout/err_channel_out_of_range.txt	stderr/err_channel_out_of_range.txt	-	--sine 1000 --channel 1
+err_unknown_option	1	exact	stdout/err_unknown_option.txt	stderr/err_unknown_option.txt	-	--frobnicate
+err_no_input	1	exact	stdout/err_no_input.txt	stderr/err_no_input.txt	-	
+help	0	exact	stdout/help.txt	-	-	--help
+measure_demo_default	0	measure	stdout/measure_demo_default.txt	-	-	--measure-demo
+measure_demo_gate10_fft2048	0	measure	stdout/measure_demo_gate10_fft2048.txt	-	-	--measure-demo --gate 10 --fft 2048
+measure_files_room	0	measure	stdout/measure_files_room.txt	-	-	--measure wav/sweep_1s_f32.wav wav/response_room_f32.wav
+measure_files_room_gate10_fft8192	0	measure	stdout/measure_files_room_gate10_fft8192.txt	-	-	--measure wav/sweep_1s_f32.wav wav/response_room_f32.wav --gate 10 --fft 8192
+measure_files_identity	0	measure	stdout/measure_files_identity.txt	-	-	--measure wav/sweep_1s_f32.wav wav/sweep_1s_f32.wav
+measure_err_rate_mismatch	1	exact	stdout/measure_err_rate_mismatch.txt	stderr/measure_err_rate_mismatch.txt	-	--measure wav/sweep_1s_f32.wav wav/sweep_44k1_i16.wav
+compare_agree_pass	0	compare	stdout/compare_agree_pass.txt	-	-	--compare stdout/rta_pink_f32_default.txt stdout/rta_pink_i24_default.txt --tolerance 0.1
+compare_agree_band	0	compare	stdout/compare_agree_band.txt	-	-	--compare stdout/rta_pink_f32_default.txt stdout/rta_pink_i16_default.txt --from-hz 100 --to-hz 10000
+compare_disagree_readout	0	compare	stdout/compare_disagree_readout.txt	-	-	--compare stdout/rta_pink_f32_default.txt stdout/rta_white_f32_default.txt
+compare_disagree_fail	1	compare	stdout/compare_disagree_fail.txt	stderr/compare_disagree_fail.txt	-	--compare stdout/rta_pink_f32_default.txt stdout/rta_white_f32_default.txt --tolerance 1
+compare_rew_export_self	0	compare	stdout/compare_rew_export_self.txt	-	-	--compare model/measurement_spectrum.rew.txt model/measurement_spectrum.rew.txt --tolerance 0.001
+compare_rew_export_cross	0	compare	stdout/compare_rew_export_cross.txt	-	-	--compare model/measurement_spectrum.rew.txt model/measurement_power_spectrum.rew.txt
+compare_no_overlap	0	compare	stdout/compare_no_overlap.txt	-	-	--compare stdout/rta_pink_f32_default.txt model/measurement_spectrum.rew.txt --from-hz 30000 --to-hz 40000
+compare_err_bad_band	1	exact	stdout/compare_err_bad_band.txt	stderr/compare_err_bad_band.txt	-	--compare stdout/rta_pink_f32_default.txt stdout/rta_pink_i24_default.txt --from-hz 500 --to-hz 100

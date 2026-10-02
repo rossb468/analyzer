@@ -1,0 +1,13 @@
+# spectrum comparison
+# band: 20.0 Hz to 20000.0 Hz
+# points: 25 (25 interpolated)
+#
+# as measured
+#   max deviation   +119.9832 dB at 19500.0 Hz
+#   rms deviation   103.1450 dB
+#
+# constant offset  +102.7576 dB  (a reference convention, not a defect)
+#
+# with that offset removed - the number that matters
+#   max deviation   +17.2255 dB at 19500.0 Hz
+#   rms deviation   8.9307 dB
