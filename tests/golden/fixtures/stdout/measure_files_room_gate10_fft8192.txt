@@ -1,0 +1,42 @@
+# swept measurement
+#   stimulus  wav/sweep_1s_f32.wav
+#   response  wav/response_room_f32.wav
+#   rate      48000 Hz
+#
+# measured:
+#   direct arrival     5.00 ms (1.71 m)
+#   impulse length     49441 samples (1.030 s)
+#   reflection         +2.00 ms at 60%
+#   reflection         +11.00 ms at 40%
+#   reflection         +25.00 ms at 20%
+#   EDT                0.160 s
+#   T20                0.137 s
+#   T30                0.137 s
+#   agreement          14.4% (estimates disagree - the decay is not a straight line)
+#
+# gated response: 11.0 ms window, valid above 91 Hz
+# frequency_hz	level_db	trustworthy
+20.0	-1.99	no
+27.0	-2.08	no
+36.5	-2.14	no
+49.2	-2.30	no
+66.5	-2.62	no
+89.8	-3.23	no
+121.2	-4.59	yes
+163.7	-7.02	yes
+221.1	-12.40	yes
+298.5	-10.24	yes
+403.1	-3.49	yes
+544.3	-2.27	yes
+734.9	-13.25	yes
+992.4	-1.95	yes
+1340.0	-6.61	yes
+1809.5	-9.11	yes
+2443.4	-2.46	yes
+3299.3	-10.24	yes
+4455.1	-2.30	yes
+6015.8	-1.99	yes
+8123.2	-4.50	yes
+10968.8	-2.10	yes
+14811.4	-8.94	yes
+20000.0	-1.97	yes

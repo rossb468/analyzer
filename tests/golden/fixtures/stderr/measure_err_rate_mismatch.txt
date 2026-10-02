@@ -1,0 +1,1 @@
+analyzer-cli: sample rate mismatch: stimulus is 48000 Hz, response is 44100 Hz

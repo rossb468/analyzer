@@ -1,0 +1,1 @@
+analyzer-cli: --fft must be even and at least 2, got 1001

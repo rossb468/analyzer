@@ -1,0 +1,16 @@
+[package]
+name = "golden-fixtures"
+description = "Writes the golden fixtures the analyzer-cli cannot produce."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Deliberately NOT a member of the repository workspace: this project must stay
+# buildable (and deletable) independently, and it has to keep working after the
+# workspace is gone. The empty table is what stops cargo walking up to the
+# parent Cargo.toml.
+[workspace]
+
+[dependencies]
+analyzer-dsp = { path = "../../../crates/analyzer-dsp" }
+analyzer-model = { path = "../../../crates/analyzer-model" }

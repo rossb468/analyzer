@@ -1,0 +1,13 @@
+# analyzer-cli spectrum
+# source: 22050 frames offline
+# sample rate: 44100 Hz
+# channels: 1 (analysed channel 0)
+# fft size: 4096
+# window: BlackmanHarris, ENBW 21.5800 Hz
+# overlap: 75.0%, hop 1024 frames
+# averaging: Infinite
+# frames averaged: 18
+# bin spacing: 10.766602 Hz
+# level reference: 0 dBFS = full-scale sine
+# frequency_hz	level_db
+441.430664	-12.0993

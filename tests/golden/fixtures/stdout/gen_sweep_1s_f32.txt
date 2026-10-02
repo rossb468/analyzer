@@ -1,0 +1,1 @@
+# wrote 48000 frames (1.000 s) at 48000 Hz, f32 to wav/sweep_1s_f32.wav

@@ -1,0 +1,1 @@
+analyzer-cli: need at least 4096 frames for a 4096-point FFT, source has 2400

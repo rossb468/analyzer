@@ -1,0 +1,1 @@
+analyzer-cli: --generate needs --out <file.wav>

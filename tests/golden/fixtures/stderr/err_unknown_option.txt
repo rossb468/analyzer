@@ -1,0 +1,1 @@
+analyzer-cli: unknown option '--frobnicate' (try --help)

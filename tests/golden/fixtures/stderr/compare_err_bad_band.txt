@@ -1,0 +1,1 @@
+analyzer-cli: --from-hz must be positive and below --to-hz

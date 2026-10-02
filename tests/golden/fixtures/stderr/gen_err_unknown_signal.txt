@@ -1,0 +1,1 @@
+analyzer-cli: --generate: unknown signal 'triangle' (sine, pink, white, sweep)
