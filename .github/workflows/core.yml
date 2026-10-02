@@ -160,13 +160,28 @@ jobs:
         run: |
           werror=ON
           [[ "${{ matrix.os }}" == windows-latest ]] && werror=OFF
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DANALYZER_WERROR=$werror
+          # The oldest macOS the app supports. Apple's libc++ hides APIs newer
+          # than the deployment target, so building for the runner's own
+          # version would accept code the app cannot compile.
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DANALYZER_WERROR=$werror \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
 
       - name: Build
         run: cmake --build build --config Debug --parallel
 
       - name: Test
         run: ctest --test-dir build --build-config Debug --output-on-failure --parallel 4
+
+      # The library the iPhone app links, cross-compiled for its oldest
+      # supported iOS. The only place the core's Objective-C++ audio backend is
+      # compiled before the app's own CI sees it.
+      - name: Build for iOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          cmake -S . -B build-ios -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DANALYZER_BUILD_TESTS=OFF
+          cmake --build build-ios --target analyzer_bundle --parallel
 
       # Optimised builds see warnings that Debug builds do not, because GCC
       # runs some analyses only after inlining.

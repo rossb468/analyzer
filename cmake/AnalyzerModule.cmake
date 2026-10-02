@@ -39,6 +39,19 @@ function(analyzer_hardening target)
         $<$<CONFIG:Debug>:_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG>)
 endfunction()
 
+# No fused multiply-add contraction, anywhere, including third-party code.
+#
+# Compilers may turn a * b + c into one FMA instruction, which rounds once
+# instead of twice. Apple Clang does so by default on arm64; GCC on x86-64 does
+# not. The results differ in the last bit, which a 24-bit WAV of generated noise
+# or a byte-for-byte golden comparison then exposes - the same core must produce
+# the same numbers on every platform it ships on. The speed cost is negligible
+# at this core's duty cycles. MSVC does not contract under its default
+# /fp:precise.
+if(NOT MSVC)
+    add_compile_options(-ffp-contract=off)
+endif()
+
 if(ANALYZER_SANITIZE STREQUAL "address")
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
                         -fno-sanitize-recover=undefined)

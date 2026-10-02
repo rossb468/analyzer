@@ -18,8 +18,8 @@
 #include <string>
 #include <system_error>
 
+#include "base/number_text.hpp"
 #include "model/error.hpp"
-#include "model/numeric.hpp"
 
 namespace analyzer::model {
 
@@ -122,7 +122,7 @@ std::vector<std::byte> header(SampleDepth depth, std::uint32_t sample_rate,
 // Clamped rather than wrapped; see write_wav.
 std::int32_t quantise(float sample, int magnitude_bits) {
     const auto peak = static_cast<float>((std::int64_t{1} << magnitude_bits) - 1);
-    return detail::saturating_cast<std::int32_t>(
+    return analyzer::saturating_cast<std::int32_t>(
         std::round(std::clamp(sample, -1.0f, 1.0f) * peak));
 }
 
@@ -204,11 +204,10 @@ std::optional<SampleDepth> depth_from_key(std::string_view key) noexcept {
 
 std::vector<float> render(dsp::Signal signal, float sample_rate, float seconds) {
     if (!std::isfinite(sample_rate) || sample_rate <= 0.0f) {
-        throw BadParameterError("sample rate must be positive, got " +
-                                detail::shortest(sample_rate));
+        throw BadParameterError("sample rate must be positive, got " + text::shortest(sample_rate));
     }
     if (!std::isfinite(seconds) || seconds <= 0.0f) {
-        throw BadParameterError("duration must be positive, got " + detail::shortest(seconds));
+        throw BadParameterError("duration must be positive, got " + text::shortest(seconds));
     }
 
     const double frames =
@@ -226,8 +225,7 @@ std::vector<float> render(dsp::Signal signal, float sample_rate, float seconds) 
 void write_wav(const std::filesystem::path& path, std::span<const float> samples, float sample_rate,
                SampleDepth depth) {
     if (!std::isfinite(sample_rate) || sample_rate <= 0.0f) {
-        throw BadParameterError("sample rate must be positive, got " +
-                                detail::shortest(sample_rate));
+        throw BadParameterError("sample rate must be positive, got " + text::shortest(sample_rate));
     }
     // The chunk sizes are 32-bit, and so is the RIFF size that includes them.
     const std::uint64_t data_bytes = std::uint64_t{samples.size()} * bytes_per_sample(depth);
@@ -242,7 +240,7 @@ void write_wav(const std::filesystem::path& path, std::span<const float> samples
     }
 
     const std::vector<std::byte> head =
-        header(depth, detail::saturating_cast<std::uint32_t>(sample_rate),
+        header(depth, analyzer::saturating_cast<std::uint32_t>(sample_rate),
                static_cast<std::uint32_t>(data_bytes));
     file.write(reinterpret_cast<const char*>(head.data()),
                static_cast<std::streamsize>(head.size()));

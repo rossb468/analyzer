@@ -3,7 +3,7 @@
 #include <cmath>
 #include <utility>
 
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 
 namespace analyzer::model {
 
@@ -23,7 +23,7 @@ std::vector<double> phase_degrees_of(const std::vector<Complex64>& bins) {
     std::vector<double> out;
     out.reserve(bins.size());
     for (const Complex64& bin : bins) {
-        out.push_back(detail::to_degrees(std::arg(bin)));
+        out.push_back(text::to_degrees(std::arg(bin)));
     }
     return out;
 }

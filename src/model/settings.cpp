@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 #include "model/text.hpp"
 
 namespace analyzer::model {
@@ -75,13 +75,13 @@ std::string Settings::to_text() const {
     line("window", as_key(window));
     line("averaging", as_key(averaging));
     line("start_on_launch", start_on_launch ? "true" : "false");
-    line("min_hz", detail::shortest(min_hz));
-    line("max_hz", detail::shortest(max_hz));
-    line("min_db", detail::shortest(min_db));
-    line("max_db", detail::shortest(max_db));
-    line("level_grid_step", detail::shortest(level_grid_step));
+    line("min_hz", text::shortest(min_hz));
+    line("max_hz", text::shortest(max_hz));
+    line("min_db", text::shortest(min_db));
+    line("max_db", text::shortest(max_db));
+    line("level_grid_step", text::shortest(level_grid_step));
     if (spl_offset_db) {
-        line("spl_offset_db", detail::shortest(*spl_offset_db));
+        line("spl_offset_db", text::shortest(*spl_offset_db));
     }
     if (mic_cal_path) {
         // A newline in a path would forge a new key; there is no escaping
@@ -110,7 +110,7 @@ Settings Settings::from_text(std::string_view text) {
         const std::string_view value = detail::trim(split->second);
 
         if (key == "fft_size") {
-            if (const auto size = detail::parse_u32(value)) {
+            if (const auto size = text::parse_u32(value)) {
                 settings.fft_size = *size;
             }
         } else if (key == "window") {
@@ -122,31 +122,31 @@ Settings Settings::from_text(std::string_view text) {
                 settings.averaging = *averaging;
             }
         } else if (key == "start_on_launch") {
-            if (const auto flag = detail::parse_bool(value)) {
+            if (const auto flag = text::parse_bool(value)) {
                 settings.start_on_launch = *flag;
             }
         } else if (key == "min_hz") {
-            if (const auto hz = detail::parse_f32(value)) {
+            if (const auto hz = text::parse_f32(value)) {
                 settings.min_hz = *hz;
             }
         } else if (key == "max_hz") {
-            if (const auto hz = detail::parse_f32(value)) {
+            if (const auto hz = text::parse_f32(value)) {
                 settings.max_hz = *hz;
             }
         } else if (key == "min_db") {
-            if (const auto db = detail::parse_f32(value)) {
+            if (const auto db = text::parse_f32(value)) {
                 settings.min_db = *db;
             }
         } else if (key == "max_db") {
-            if (const auto db = detail::parse_f32(value)) {
+            if (const auto db = text::parse_f32(value)) {
                 settings.max_db = *db;
             }
         } else if (key == "level_grid_step") {
-            if (const auto step = detail::parse_f32(value)) {
+            if (const auto step = text::parse_f32(value)) {
                 settings.level_grid_step = *step;
             }
         } else if (key == "spl_offset_db") {
-            if (const auto offset = detail::parse_f32(value)) {
+            if (const auto offset = text::parse_f32(value)) {
                 settings.spl_offset_db = *offset;
             }
         } else if (key == "mic_cal_path") {

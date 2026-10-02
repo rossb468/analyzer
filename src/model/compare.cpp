@@ -5,7 +5,7 @@
 #include <numeric>
 #include <utility>
 
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 #include "model/text.hpp"
 
 namespace analyzer::model {
@@ -84,8 +84,8 @@ Response Response::parse(std::string_view text) {
         if (found < 2) {
             continue;
         }
-        const auto hz = detail::parse_f64(fields[0]);
-        const auto db = detail::parse_f64(fields[1]);
+        const auto hz = text::parse_f64(fields[0]);
+        const auto db = text::parse_f64(fields[1]);
         if (!hz || !db) {
             continue;
         }
@@ -140,7 +140,7 @@ bool Response::has_exact(double hz) const {
 std::string Comparison::report() const {
     std::string out;
     line(out, "# spectrum comparison");
-    line(out, "# band: " + detail::fixed(from_hz, 1) + " Hz to " + detail::fixed(to_hz, 1) + " Hz");
+    line(out, "# band: " + text::fixed(from_hz, 1) + " Hz to " + text::fixed(to_hz, 1) + " Hz");
     line(out, "# points: " + std::to_string(compared) + " (" + std::to_string(interpolated) +
                   " interpolated)");
     if (compared == 0) {
@@ -150,17 +150,17 @@ std::string Comparison::report() const {
     }
     line(out, "#");
     line(out, "# as measured");
-    line(out, "#   max deviation   " + detail::signed_fixed(max_deviation, 4) + " dB at " +
-                  detail::fixed(max_deviation_hz, 1) + " Hz");
-    line(out, "#   rms deviation   " + detail::fixed(rms_deviation, 4) + " dB");
+    line(out, "#   max deviation   " + text::signed_fixed(max_deviation, 4) + " dB at " +
+                  text::fixed(max_deviation_hz, 1) + " Hz");
+    line(out, "#   rms deviation   " + text::fixed(rms_deviation, 4) + " dB");
     line(out, "#");
-    line(out, "# constant offset  " + detail::signed_fixed(mean_offset, 4) +
+    line(out, "# constant offset  " + text::signed_fixed(mean_offset, 4) +
                   " dB  (a reference convention, not a defect)");
     line(out, "#");
     line(out, "# with that offset removed - the number that matters");
-    line(out, "#   max deviation   " + detail::signed_fixed(max_deviation_after_offset, 4) +
-                  " dB at " + detail::fixed(max_deviation_after_offset_hz, 1) + " Hz");
-    line(out, "#   rms deviation   " + detail::fixed(rms_deviation_after_offset, 4) + " dB");
+    line(out, "#   max deviation   " + text::signed_fixed(max_deviation_after_offset, 4) +
+                  " dB at " + text::fixed(max_deviation_after_offset_hz, 1) + " Hz");
+    line(out, "#   rms deviation   " + text::fixed(rms_deviation_after_offset, 4) + " dB");
     return out;
 }
 

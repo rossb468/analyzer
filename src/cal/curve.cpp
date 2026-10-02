@@ -1,13 +1,13 @@
 #include "cal/curve.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <optional>
-#include <system_error>
 #include <utility>
+
+#include "base/number_text.hpp"
 
 namespace analyzer::cal {
 
@@ -43,20 +43,14 @@ std::string_view next_field(std::string_view& line) {
 
 // Parse a whole field as a float, or nothing if any of it is left over.
 //
-// from_chars rather than strtof: it ignores the C locale, so a host that has
+// Rust's `str::parse` rules, shared with every other text format in the core:
+// a leading '+' is accepted, the C locale is ignored - so a host that has
 // called setlocale() with a decimal-comma locale still reads "1000.5" as a
-// vendor wrote it. It does not accept a leading '+', which Rust's parse does,
-// so that is stripped by hand.
+// vendor wrote it - and trailing text is refused. std::from_chars would do
+// most of this, but its floating-point overloads are missing from the libc++
+// that ships with the oldest macOS and iOS this core supports.
 std::optional<float> parse_float(std::string_view field) {
-    if (field.size() > 1 && field.front() == '+' && field[1] != '+' && field[1] != '-') {
-        field.remove_prefix(1);
-    }
-    float value = 0.0f;
-    const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), value);
-    if (error != std::errc{} || end != field.data() + field.size()) {
-        return std::nullopt;
-    }
-    return value;
+    return text::parse_f32(field);
 }
 
 bool is_comment(std::string_view line) {

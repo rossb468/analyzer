@@ -1,4 +1,4 @@
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +11,7 @@
 
 #include "base/contract.hpp"
 
-namespace analyzer::model::detail {
+namespace analyzer::text {
 
 namespace {
 
@@ -235,4 +235,4 @@ std::optional<bool> parse_bool(std::string_view text) noexcept {
     return std::nullopt;
 }
 
-}  // namespace analyzer::model::detail
+}  // namespace analyzer::text

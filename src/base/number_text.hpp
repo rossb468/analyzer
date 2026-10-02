@@ -1,6 +1,7 @@
 // Numbers to text and back, the way the Rust core did it.
 //
-// Internal to this module; not part of its interface.
+// Shared by every module that reads or writes text: the model's file formats,
+// calibration files and the command-line harness.
 //
 // Every text format here - the measurement header, the REW export, the filter
 // exports, the settings file - prints numbers with Rust's `{}` and `{:.N}`, and
@@ -35,12 +36,7 @@
 
 #include "base/numeric.hpp"
 
-namespace analyzer::model::detail {
-
-// Float to integer conversion that cannot be undefined behaviour. This module
-// converts values read from files and arguments from callers, so every such
-// conversion goes through the shared helper.
-using analyzer::saturating_cast;
+namespace analyzer::text {
 
 // Radians to degrees, as Rust's `f64::to_degrees`.
 //
@@ -90,4 +86,4 @@ std::optional<std::uint32_t> parse_u32(std::string_view text) noexcept;
 // Parse as Rust's `bool::from_str`: exactly `true` or `false`.
 std::optional<bool> parse_bool(std::string_view text) noexcept;
 
-}  // namespace analyzer::model::detail
+}  // namespace analyzer::text

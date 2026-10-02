@@ -65,10 +65,15 @@ TEST(Run, OutWritesTheReportToAFileAndSaysSoOnStderr) {
     EXPECT_TRUE(result.out.empty());
     EXPECT_EQ(result.err, "wrote " + file + "\n");
 
-    std::ifstream written(path);
-    std::ostringstream buffer;
-    buffer << written.rdbuf();
-    const std::string text = buffer.str();
+    std::string text;
+    {
+        // Closed before the remove below: Windows will not delete a file that
+        // is still open.
+        std::ifstream written(path);
+        std::ostringstream buffer;
+        buffer << written.rdbuf();
+        text = buffer.str();
+    }
     EXPECT_NE(text.find("# analyzer-cli spectrum"), std::string::npos);
     std::filesystem::remove(path);
 }

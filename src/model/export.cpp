@@ -6,7 +6,7 @@
 #include <string_view>
 #include <variant>
 
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 
 namespace analyzer::model {
 
@@ -25,7 +25,7 @@ double level_db(const Complex64& bin, double offset) {
 }
 
 double phase_degrees(const Complex64& bin) {
-    return detail::to_degrees(std::arg(bin));
+    return text::to_degrees(std::arg(bin));
 }
 
 struct Writer {
@@ -37,9 +37,9 @@ struct Writer {
         line(out, "* Freq(Hz) SPL(dB) Phase(degrees)");
         for (std::size_t index = 0; index < spectrum.bins.size(); ++index) {
             const Complex64& bin = spectrum.bins[index];
-            line(out, detail::fixed(static_cast<double>(index) * spectrum.bin_spacing_hz, 6) + " " +
-                          detail::fixed(level_db(bin, offset), 4) + " " +
-                          detail::fixed(phase_degrees(bin), 4));
+            line(out, text::fixed(static_cast<double>(index) * spectrum.bin_spacing_hz, 6) + " " +
+                          text::fixed(level_db(bin, offset), 4) + " " +
+                          text::fixed(phase_degrees(bin), 4));
         }
     }
 
@@ -48,8 +48,8 @@ struct Writer {
         // column, and inventing one would be worse than omitting it.
         line(out, "* Freq(Hz) SPL(dB)");
         for (std::size_t index = 0; index < power.magnitude_db.size(); ++index) {
-            line(out, detail::fixed(static_cast<double>(index) * power.bin_spacing_hz, 6) + " " +
-                          detail::fixed(power.magnitude_db[index] + offset, 4));
+            line(out, text::fixed(static_cast<double>(index) * power.bin_spacing_hz, 6) + " " +
+                          text::fixed(power.magnitude_db[index] + offset, 4));
         }
     }
 
@@ -62,9 +62,9 @@ struct Writer {
             const Complex64& bin = transfer.bins[index];
             const double gamma =
                 index < transfer.coherence.size() ? transfer.coherence[index] : 0.0;
-            line(out, detail::fixed(static_cast<double>(index) * transfer.bin_spacing_hz, 6) + " " +
-                          detail::fixed(level_db(bin, offset), 4) + " " +
-                          detail::fixed(phase_degrees(bin), 4) + " * " + detail::fixed(gamma, 4));
+            line(out, text::fixed(static_cast<double>(index) * transfer.bin_spacing_hz, 6) + " " +
+                          text::fixed(level_db(bin, offset), 4) + " " +
+                          text::fixed(phase_degrees(bin), 4) + " * " + text::fixed(gamma, 4));
         }
     }
 
@@ -72,11 +72,11 @@ struct Writer {
         // A different shape entirely: time against amplitude, with t = 0 at
         // the recorded arrival rather than at the first sample.
         line(out, "* Time(s) Amplitude");
-        line(out, "* Time zero at sample " + detail::shortest(ir.time_zero_samples));
+        line(out, "* Time zero at sample " + text::shortest(ir.time_zero_samples));
         const double rate = measurement.sample_rate > 0.0 ? measurement.sample_rate : 1.0;
         for (std::size_t index = 0; index < ir.samples.size(); ++index) {
             const double seconds = (static_cast<double>(index) - ir.time_zero_samples) / rate;
-            line(out, detail::fixed(seconds, 9) + " " + detail::fixed(ir.samples[index], 9));
+            line(out, text::fixed(seconds, 9) + " " + text::fixed(ir.samples[index], 9));
         }
     }
 };
@@ -93,12 +93,12 @@ std::string to_rew_text(const Measurement& measurement) {
 
     line(out, "* Measurement data saved by analyzer");
     line(out, "* Name: " + name);
-    line(out, "* Sample rate: " + detail::shortest(measurement.sample_rate) + " Hz");
+    line(out, "* Sample rate: " + text::shortest(measurement.sample_rate) + " Hz");
     if (const auto delay = measurement.references.propagation_delay_seconds) {
-        line(out, "* Propagation delay removed: " + detail::shortest(*delay) + " s");
+        line(out, "* Propagation delay removed: " + text::shortest(*delay) + " s");
     }
     if (calibrated) {
-        line(out, "* SPL offset applied: " + detail::shortest(offset) + " dB");
+        line(out, "* SPL offset applied: " + text::shortest(offset) + " dB");
     } else {
         line(out, "* Levels are dBFS - this measurement is not SPL calibrated");
     }

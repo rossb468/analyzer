@@ -2,7 +2,7 @@
 // core's. Every expected string here is what Rust's `{}` / `{:.N}` / `parse`
 // produces.
 
-#include "model/numeric.hpp"
+#include "base/number_text.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-namespace analyzer::model::detail {
+namespace analyzer::text {
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -185,15 +185,18 @@ TEST(ParseBool, ExactlyTrueOrFalse) {
 }
 
 TEST(SaturatingCast, MatchesRustsAs) {
-    EXPECT_EQ(saturating_cast<std::uint64_t>(-1.0), 0u);
-    EXPECT_EQ(saturating_cast<std::uint64_t>(kNaN), 0u);
-    EXPECT_EQ(saturating_cast<std::uint64_t>(1e300), std::numeric_limits<std::uint64_t>::max());
-    EXPECT_EQ(saturating_cast<std::uint64_t>(7.9), 7u);
-    EXPECT_EQ(saturating_cast<std::int64_t>(-1e300), std::numeric_limits<std::int64_t>::min());
-    EXPECT_EQ(saturating_cast<std::int64_t>(-7.9), -7);
-    EXPECT_EQ(saturating_cast<std::int32_t>(40000.5f), 40000);
-    EXPECT_EQ(saturating_cast<std::uint32_t>(48000.9f), 48000u);
-    EXPECT_EQ(saturating_cast<std::uint32_t>(1e20f), std::numeric_limits<std::uint32_t>::max());
+    EXPECT_EQ(analyzer::saturating_cast<std::uint64_t>(-1.0), 0u);
+    EXPECT_EQ(analyzer::saturating_cast<std::uint64_t>(kNaN), 0u);
+    EXPECT_EQ(analyzer::saturating_cast<std::uint64_t>(1e300),
+              std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(analyzer::saturating_cast<std::uint64_t>(7.9), 7u);
+    EXPECT_EQ(analyzer::saturating_cast<std::int64_t>(-1e300),
+              std::numeric_limits<std::int64_t>::min());
+    EXPECT_EQ(analyzer::saturating_cast<std::int64_t>(-7.9), -7);
+    EXPECT_EQ(analyzer::saturating_cast<std::int32_t>(40000.5f), 40000);
+    EXPECT_EQ(analyzer::saturating_cast<std::uint32_t>(48000.9f), 48000u);
+    EXPECT_EQ(analyzer::saturating_cast<std::uint32_t>(1e20f),
+              std::numeric_limits<std::uint32_t>::max());
 }
 
 TEST(ToDegrees, MultipliesByRustsConstant) {
@@ -203,4 +206,4 @@ TEST(ToDegrees, MultipliesByRustsConstant) {
 }
 
 }  // namespace
-}  // namespace analyzer::model::detail
+}  // namespace analyzer::text

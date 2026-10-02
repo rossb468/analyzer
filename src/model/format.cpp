@@ -8,8 +8,8 @@
 #include <string>
 #include <utility>
 
+#include "base/number_text.hpp"
 #include "model/error.hpp"
-#include "model/numeric.hpp"
 #include "model/text.hpp"
 
 namespace analyzer::model {
@@ -48,7 +48,7 @@ void append_line(std::string& header, std::string_view key, std::string_view val
 
 void write_optional(std::string& header, std::string_view name, std::optional<double> value) {
     if (value) {
-        append_line(header, name, detail::shortest(*value));
+        append_line(header, name, text::shortest(*value));
     }
     // Absent means unknown. Writing a placeholder would turn "not measured"
     // into "measured as zero" on the next read.
@@ -174,15 +174,15 @@ std::vector<std::byte> write_measurement(const Measurement& measurement) {
     append_line(header, "notes", escape(measurement.notes));
     append_line(header, "id", std::to_string(measurement.id.value));
     append_line(header, "captured_at", std::to_string(measurement.captured_at));
-    append_line(header, "sample_rate", detail::shortest(measurement.sample_rate));
+    append_line(header, "sample_rate", text::shortest(measurement.sample_rate));
     append_line(header, "channels", std::to_string(measurement.channels));
     append_line(header, "kind", kind(measurement.data));
     append_line(header, "points", std::to_string(point_count(measurement.data)));
 
     if (const std::optional<double> spacing = bin_spacing_hz(measurement.data)) {
-        append_line(header, "bin_spacing_hz", detail::shortest(*spacing));
+        append_line(header, "bin_spacing_hz", text::shortest(*spacing));
     } else if (const auto* ir = std::get_if<ImpulseResponseData>(&measurement.data)) {
-        append_line(header, "time_zero_samples", detail::shortest(ir->time_zero_samples));
+        append_line(header, "time_zero_samples", text::shortest(ir->time_zero_samples));
     }
 
     const References& references = measurement.references;
@@ -252,7 +252,7 @@ Measurement read_measurement(std::span<const std::byte> bytes) {
         if (!raw) {
             throw MissingFieldError(std::string(name));
         }
-        const std::optional<double> value = detail::parse_f64(*raw);
+        const std::optional<double> value = text::parse_f64(*raw);
         if (!value) {
             throw BadValueError(std::string(name), std::string(*raw));
         }
@@ -260,14 +260,14 @@ Measurement read_measurement(std::span<const std::byte> bytes) {
     };
     const auto optional_number = [&get](std::string_view name) -> std::optional<double> {
         const std::optional<std::string_view> raw = get(name);
-        return raw ? detail::parse_f64(*raw) : std::nullopt;
+        return raw ? text::parse_f64(*raw) : std::nullopt;
     };
 
     const std::optional<std::string_view> kind_text = get("kind");
     if (!kind_text) {
         throw MissingFieldError("kind");
     }
-    const auto points = detail::saturating_cast<std::size_t>(number("points"));
+    const auto points = analyzer::saturating_cast<std::size_t>(number("points"));
     const double sample_rate = number("sample_rate");
 
     // The data block is read before the key that goes with it, so a file with
@@ -298,14 +298,14 @@ Measurement read_measurement(std::span<const std::byte> bytes) {
         throw UnknownKindError(std::string(*kind_text));
     }
 
-    Measurement measurement(
-        MeasurementId{detail::saturating_cast<std::uint64_t>(optional_number("id").value_or(0.0))},
-        unescape(get("name").value_or("")), sample_rate, std::move(payload));
+    Measurement measurement(MeasurementId{analyzer::saturating_cast<std::uint64_t>(
+                                optional_number("id").value_or(0.0))},
+                            unescape(get("name").value_or("")), sample_rate, std::move(payload));
     measurement.notes = unescape(get("notes").value_or(""));
     measurement.captured_at =
-        detail::saturating_cast<std::int64_t>(optional_number("captured_at").value_or(0.0));
+        analyzer::saturating_cast<std::int64_t>(optional_number("captured_at").value_or(0.0));
     measurement.channels =
-        detail::saturating_cast<std::size_t>(optional_number("channels").value_or(1.0));
+        analyzer::saturating_cast<std::size_t>(optional_number("channels").value_or(1.0));
     measurement.references.spl_offset_db = optional_number("spl_offset_db");
     measurement.references.full_scale_input_volts = optional_number("full_scale_input_volts");
     measurement.references.full_scale_output_volts = optional_number("full_scale_output_volts");
