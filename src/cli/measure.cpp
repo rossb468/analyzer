@@ -13,15 +13,13 @@
 #include "cli/error.hpp"
 #include "cli/source.hpp"
 #include "dsp/deconv.hpp"
+#include "dsp/delay.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/ir.hpp"
 
 namespace analyzer::cli {
 
 namespace {
-
-// Speed of sound used to turn a delay into a distance.
-constexpr float kSpeedOfSound = 343.0f;
 
 using text::append_line;
 
@@ -111,7 +109,7 @@ struct SyntheticRoom {
 void report_impulse(std::string& out, const dsp::ImpulseResponse& ir) {
     const float arrival_seconds = ir.peak_samples / ir.sample_rate;
     append_line(out, "#   direct arrival     " + text::fixed(arrival_seconds * 1000.0f, 2) +
-                         " ms (" + text::fixed(arrival_seconds * kSpeedOfSound, 2) + " m)");
+                         " ms (" + text::fixed(arrival_seconds * dsp::kSpeedOfSound, 2) + " m)");
     append_line(out, "#   impulse length     " + std::to_string(ir.samples.size()) + " samples (" +
                          text::fixed(ir.duration_seconds(), 3) + " s)");
 
@@ -216,7 +214,8 @@ std::string demo(const MeasureOptions& options) {
     append_line(out, "#");
     append_line(out, "# constructed:");
     append_line(out, "#   direct arrival     " + text::fixed(room.direct_seconds * 1000.0f, 2) +
-                         " ms (" + text::fixed(room.direct_seconds * kSpeedOfSound, 2) + " m)");
+                         " ms (" + text::fixed(room.direct_seconds * dsp::kSpeedOfSound, 2) +
+                         " m)");
     for (const auto& reflection : room.reflections) {
         append_line(out, "#   reflection         +" +
                              text::fixed(reflection.offset_seconds * 1000.0f, 2) + " ms at " +

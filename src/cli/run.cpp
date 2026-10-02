@@ -16,6 +16,7 @@
 #include "audio/error.hpp"
 #include "audio/offline.hpp"
 #include "base/number_text.hpp"
+#include "base/os_error.hpp"
 #include "cli/args.hpp"
 #include "cli/bench.hpp"
 #include "cli/error.hpp"
@@ -34,15 +35,9 @@ namespace analyzer::cli {
 
 namespace {
 
-// The operating system's words for the last failed call, in the shape Rust's
-// io::Error printed them: "No such file or directory (os error 2)".
+// The operating system's words for the last failed call.
 std::string os_error() {
-    const int code = errno;
-    if (code == 0) {
-        return "unknown error";
-    }
-    return std::error_code(code, std::generic_category()).message() + " (os error " +
-           std::to_string(code) + ")";
+    return errno == 0 ? "unknown error" : os_error_text(errno);
 }
 
 std::string read_text(const std::filesystem::path& path) {
