@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <numbers>
@@ -32,6 +33,24 @@ inline std::vector<float> sine(std::size_t count, float cycles_per_period, std::
         out[n] = amplitude * std::sin(kTau * cycles_per_period * t);
     }
     return out;
+}
+
+// `count` frequencies spaced evenly on a log axis from `from` to `to`, both
+// included: the shape of the plot's own column frequencies, and of what the
+// optimiser and target curves are given. `count` must be at least 2.
+inline std::vector<float> log_spaced(float from, float to, std::size_t count) {
+    std::vector<float> out(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
+        out[i] = from * std::pow(to / from, t);
+    }
+    return out;
+}
+
+// Index of the largest value, the first of any equals.
+inline std::size_t peak_bin(std::span<const float> values) {
+    return static_cast<std::size_t>(std::max_element(values.begin(), values.end()) -
+                                    values.begin());
 }
 
 // Assert two equal-length spans agree element by element within `tolerance`,

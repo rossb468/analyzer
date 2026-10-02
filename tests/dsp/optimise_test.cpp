@@ -13,20 +13,12 @@
 
 #include "dsp/biquad.hpp"
 #include "dsp/target.hpp"
+#include "support/signals.hpp"
 
 namespace analyzer::dsp {
 namespace {
 
 constexpr float kRate = 48'000.0f;
-
-std::vector<float> log_sweep(float from, float to, std::size_t count) {
-    std::vector<float> out(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
-        out[i] = from * std::pow(to / from, t);
-    }
-    return out;
-}
 
 // A measurement that is flat except for one resonance.
 std::vector<float> with_peak(const std::vector<float>& frequencies, float hz, float gain_db,
@@ -63,7 +55,7 @@ std::string describe(std::span<const FilterBand> bands) {
 }
 
 TEST(Optimise, ASingleResonanceIsCorrectedNearlyFlat) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto measured = with_peak(frequencies, 63.0f, 8.0f, 4.0f);
 
     const Optimisation result = optimise(frequencies, measured, flat_target());
@@ -75,7 +67,7 @@ TEST(Optimise, ASingleResonanceIsCorrectedNearlyFlat) {
 }
 
 TEST(Optimise, TheFirstFilterLandsOnTheResonance) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto measured = with_peak(frequencies, 63.0f, 8.0f, 4.0f);
 
     const Optimisation result = optimise(frequencies, measured, flat_target());
@@ -87,7 +79,7 @@ TEST(Optimise, TheFirstFilterLandsOnTheResonance) {
 }
 
 TEST(Optimise, TwoResonancesGetTwoFilters) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 600);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 600);
     const auto first = with_peak(frequencies, 45.0f, 7.0f, 6.0f);
     const auto second = with_peak(frequencies, 180.0f, -6.0f, 5.0f);
     const auto measured = sum(first, second);
@@ -101,7 +93,7 @@ TEST(Optimise, TwoResonancesGetTwoFilters) {
 // The rule the module exists to enforce. A null is a cancellation, and
 // boosting it burns headroom without filling it.
 TEST(Optimise, ADeepNullIsNotBoostedPastTheCap) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto measured = with_peak(frequencies, 80.0f, -20.0f, 8.0f);
 
     OptimiserConfig config;
@@ -114,7 +106,7 @@ TEST(Optimise, ADeepNullIsNotBoostedPastTheCap) {
 }
 
 TEST(Optimise, CutsAndBoostsRespectTheirSeparateCaps) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto peak = with_peak(frequencies, 60.0f, 18.0f, 5.0f);
     const auto dip = with_peak(frequencies, 200.0f, -18.0f, 5.0f);
     const auto measured = sum(peak, dip);
@@ -131,7 +123,7 @@ TEST(Optimise, CutsAndBoostsRespectTheirSeparateCaps) {
 }
 
 TEST(Optimise, FiltersStayInsideTheQLimits) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto measured = with_peak(frequencies, 63.0f, 10.0f, 20.0f);
 
     OptimiserConfig config;
@@ -145,7 +137,7 @@ TEST(Optimise, FiltersStayInsideTheQLimits) {
 }
 
 TEST(Optimise, NothingOutsideTheBandIsCorrected) {
-    const auto frequencies = log_sweep(20.0f, 20'000.0f, 800);
+    const auto frequencies = test::log_spaced(20.0f, 20'000.0f, 800);
     const auto measured = with_peak(frequencies, 5000.0f, 10.0f, 4.0f);
 
     const Optimisation result = optimise(frequencies, measured, flat_target());
@@ -155,14 +147,14 @@ TEST(Optimise, NothingOutsideTheBandIsCorrected) {
 // A flat measurement needs no filters, and producing some anyway would be
 // the optimiser inventing work.
 TEST(Optimise, AnAlreadyFlatMeasurementGetsNoFilters) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const std::vector<float> measured(frequencies.size(), 0.0f);
     const Optimisation result = optimise(frequencies, measured, flat_target());
     EXPECT_TRUE(result.bands.empty());
 }
 
 TEST(Optimise, TheFitNeverMakesTheErrorWorse) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     struct Case {
         float hz;
         float gain;
@@ -180,14 +172,14 @@ TEST(Optimise, TheFitNeverMakesTheErrorWorse) {
 // Comparing two corrections is impossible if the same input can produce
 // different filters.
 TEST(Optimise, TheFitIsDeterministic) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const auto measured = with_peak(frequencies, 63.0f, 8.0f, 4.0f);
     const auto run = [&] { return optimise(frequencies, measured, flat_target()); };
     EXPECT_TRUE(run() == run());
 }
 
 TEST(Optimise, ItHonoursANonFlatTarget) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     // The measurement already has the bass lift the target asks for, so
     // there is nothing to correct.
     const TargetCurve target(TargetShape::room());
@@ -202,7 +194,7 @@ TEST(Optimise, ItHonoursANonFlatTarget) {
 }
 
 TEST(Optimise, AMeasurementMissingTheTargetsBassLiftGetsBoosted) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     const TargetCurve target(TargetShape::room());
     const std::vector<float> measured(frequencies.size(), 0.0f);
 
@@ -216,7 +208,7 @@ TEST(Optimise, AMeasurementMissingTheTargetsBassLiftGetsBoosted) {
 }
 
 TEST(Optimise, MaxFiltersIsRespected) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 600);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 600);
     std::vector<float> measured(frequencies.size(), 0.0f);
     const float centres[] = {30.0f, 55.0f, 90.0f, 140.0f, 220.0f, 350.0f};
     for (std::size_t index = 0; index < std::size(centres); ++index) {
@@ -251,7 +243,7 @@ TEST(Optimise, EmptyAndDegenerateInputIsSurvivable) {
 }
 
 TEST(Optimise, ANonsenseConfigurationIsRepairedRatherThanObeyed) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 200);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 200);
     const auto measured = with_peak(frequencies, 63.0f, 8.0f, 4.0f);
     OptimiserConfig config;
     config.from_hz = 0.0f;
@@ -269,7 +261,7 @@ TEST(Optimise, ANonsenseConfigurationIsRepairedRatherThanObeyed) {
 }
 
 TEST(Optimise, NonFiniteMeasurementPointsAreSkipped) {
-    const auto frequencies = log_sweep(20.0f, 500.0f, 400);
+    const auto frequencies = test::log_spaced(20.0f, 500.0f, 400);
     auto measured = with_peak(frequencies, 63.0f, 8.0f, 4.0f);
     measured[10] = std::numeric_limits<float>::quiet_NaN();
     measured[20] = -std::numeric_limits<float>::infinity();

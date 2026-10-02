@@ -20,7 +20,7 @@ add_library(analyzer::test_support ALIAS analyzer_test_support)
 target_include_directories(analyzer_test_support INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(analyzer_test_support INTERFACE GTest::gtest)
 
-foreach(module dsp cal plot model engine audio ffi cli)
+foreach(module base dsp cal plot model engine audio ffi cli)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${module}/CMakeLists.txt)
         add_subdirectory(${module})
     endif()

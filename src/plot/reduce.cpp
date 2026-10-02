@@ -5,7 +5,7 @@
 #include <limits>
 #include <numbers>
 
-#include "plot/saturating_cast.hpp"
+#include "base/numeric.hpp"
 
 namespace analyzer::plot {
 

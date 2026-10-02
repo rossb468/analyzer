@@ -11,56 +11,15 @@
 
 #include <gtest/gtest.h>
 
-#include "dsp/complex.hpp"
-#include "dsp/fft.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/window.hpp"
+#include "support/spectra.hpp"
 
 namespace analyzer::dsp {
 namespace {
 
 constexpr float kRate = 48'000.0f;
 constexpr std::size_t kSize = 8192;
-
-// Stand-in for the Rust SpectrumAnalyzer, which is ported separately: a Welch
-// average of 50%-overlapped, windowed frames, in the analyzer's own power
-// convention (mean-square per bin, a bin-centred sine of amplitude A reads
-// A^2 / 2), returned as dBFS where 0 dBFS is a full-scale sine. Averaging is
-// the incremental mean the analyzer uses for Averaging::Infinite.
-std::vector<float> average_db_fs(std::span<const float> samples, std::size_t size,
-                                 WindowKind kind) {
-    const Window window(kind, size);
-    RealFft fft(size);
-    const float scale = 1.0f / (static_cast<float>(size) * window.coherent_gain());
-    const std::size_t hop = size / 2;
-
-    std::vector<float> windowed(size);
-    std::vector<Complex32> spectrum(fft.bins());
-    std::vector<float> power(fft.bins(), 0.0f);
-    const std::size_t last = fft.bins() - 1;
-
-    std::size_t frames = 0;
-    for (std::size_t start = 0; start + size <= samples.size(); start += hop) {
-        window.apply_to(samples.subspan(start, size), windowed);
-        fft.forward(windowed, spectrum);
-        ++frames;
-        const auto n = static_cast<float>(frames);
-        for (std::size_t k = 0; k < power.size(); ++k) {
-            // DC and Nyquist are real and unpaired; every bin between them
-            // stands for a conjugate pair.
-            const float magnitude = std::abs(spectrum[k]) * scale;
-            const float frame_power =
-                (k == 0 || k == last) ? magnitude * magnitude : 2.0f * magnitude * magnitude;
-            power[k] += (frame_power - power[k]) / n;
-        }
-    }
-
-    // A full-scale sine has mean square 0.5, so 2 * power normalises it to unity.
-    for (float& value : power) {
-        value = value > 0.0f ? std::max(10.0f * std::log10(2.0f * value), -200.0f) : -200.0f;
-    }
-    return power;
-}
 
 std::vector<float> nominal_centres(const OctaveBands& bands) {
     std::vector<float> nominal;
@@ -144,7 +103,7 @@ TEST(OctaveBands, PinkNoiseIsFlatAcrossOctaveBands) {
     std::vector<float> samples(kSize * 32, 0.0f);
     generator.fill(samples);
 
-    const auto bins = average_db_fs(samples, kSize, WindowKind::hann());
+    const auto bins = test::average_db_fs(samples, kRate, kSize, WindowKind::hann());
 
     const OctaveBands bands(1, 63.0f, 8000.0f);
     std::vector<float> levels(bands.size(), 0.0f);
@@ -169,7 +128,7 @@ TEST(OctaveBands, WhiteNoiseRisesThreeDecibelsPerOctaveBand) {
     std::vector<float> samples(kSize * 32, 0.0f);
     generator.fill(samples);
 
-    const auto bins = average_db_fs(samples, kSize, WindowKind::hann());
+    const auto bins = test::average_db_fs(samples, kRate, kSize, WindowKind::hann());
 
     const OctaveBands bands(1, 125.0f, 8000.0f);
     std::vector<float> levels(bands.size(), 0.0f);

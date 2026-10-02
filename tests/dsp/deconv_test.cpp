@@ -15,65 +15,16 @@
 
 #include <gtest/gtest.h>
 
+#include "support/generated_signals.hpp"
+
 namespace analyzer::dsp {
 namespace {
 
 constexpr float kRate = 48000.0f;
 constexpr std::size_t kLength = 16384;
 
-// The Rust tests build their signals with dsp::Generator, which is ported
-// separately. These are the same xorshift noise and Farina sweep, so a seed
-// gives the same signal; swap them for Generator once it exists.
-class WhiteNoise {
-public:
-    explicit WhiteNoise(std::uint64_t seed) : state_(seed == 0 ? 0x9E3779B97F4A7C15ull : seed) {}
-
-    // Uniform in [-1, 1).
-    float next_sample() {
-        std::uint64_t x = state_;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        state_ = x;
-        const std::uint64_t scrambled = x * 0x2545F4914F6CDD1Dull;
-        // Top 24 bits; the low bits of xorshift are weak.
-        return static_cast<float>(scrambled >> 40) / 8388608.0f - 1.0f;
-    }
-
-private:
-    std::uint64_t state_;
-};
-
-std::vector<float> white_noise(std::size_t samples, float amplitude, std::uint64_t seed) {
-    WhiteNoise rng(seed);
-    std::vector<float> out(samples);
-    for (float& sample : out) {
-        sample = rng.next_sample() * amplitude;
-    }
-    return out;
-}
-
-// One non-repeating exponential sweep, `samples` long, computed in double as
-// the generator does so the phase does not drift.
-std::vector<float> sweep(std::size_t samples, float start_hz = 20.0f, float end_hz = 20000.0f,
-                         float amplitude = 0.5f) {
-    constexpr double kTauD = 2.0 * std::numbers::pi;
-    const double rate = static_cast<double>(kRate);
-    const double start = static_cast<double>(start_hz);
-    const double end = static_cast<double>(end_hz);
-    const double duration = static_cast<double>(static_cast<float>(samples) / kRate);
-    const auto total = static_cast<std::size_t>(duration * rate);
-    const double ratio = std::log(end / start);
-
-    std::vector<float> out(samples, 0.0f);
-    for (std::size_t n = 0; n < std::min(samples, total); ++n) {
-        const double t = static_cast<double>(n) / rate;
-        const double phase =
-            (kTauD * start * duration / ratio) * (std::exp(t / duration * ratio) - 1.0);
-        out[n] = static_cast<float>(std::sin(phase)) * amplitude;
-    }
-    return out;
-}
+using test::sweep;
+using test::white_noise;
 
 // A recording of `source` arriving `delay` samples late.
 //

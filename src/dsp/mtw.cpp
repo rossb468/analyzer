@@ -6,6 +6,7 @@
 #include <numbers>
 
 #include "base/contract.hpp"
+#include "base/numeric.hpp"
 
 namespace analyzer::dsp {
 
@@ -72,7 +73,7 @@ MultiTimeWindow::MultiTimeWindow(const MtwConfig& config) : sample_rate_(config.
     // a few hundred.
     const float octaves = std::log2(nyquist / config.min_hz);
     const auto per_octave = static_cast<float>(config.points_per_octave);
-    const auto count = static_cast<std::size_t>(std::ceil(octaves * per_octave));
+    const auto count = saturating_cast<std::size_t>(std::ceil(octaves * per_octave));
     const float step = std::pow(2.0f, 1.0f / per_octave);
 
     points_.reserve(count + 1);
@@ -123,7 +124,7 @@ void MultiTimeWindow::resolve() noexcept {
             continue;
         }
         const float exact = point.hz / spacing;
-        const auto lower = static_cast<std::size_t>(std::floor(exact));
+        const auto lower = saturating_cast<std::size_t>(std::floor(exact));
         const float fraction = exact - static_cast<float>(lower);
 
         // The bin above may not exist at the very top of the lowest band's
