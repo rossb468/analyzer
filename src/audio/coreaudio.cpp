@@ -409,7 +409,7 @@ void scatter_output(AudioBufferList* list, std::span<const std::uint32_t> select
 }
 
 // Copy the selected channels out of CoreAudio's buffer list into one
-// interleaved slice, returning the frames gathered.
+// interleaved buffer, returning the frames gathered.
 //
 // The HAL presents one AudioBuffer per stream, so a device may hand over a
 // single interleaved buffer or several. Both shapes are flattened here so the

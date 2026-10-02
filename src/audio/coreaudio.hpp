@@ -7,14 +7,14 @@
 // figures, and adds no resampling or mixing between the converter and us.
 //
 // Device identity
-// ---------------
+//
 // DeviceId carries the device's **UID**, not its AudioDeviceID. The numeric id
 // is only stable within a boot, so persisting it in a session would silently
 // reopen the wrong device tomorrow. The UID survives reboots and reconnection,
 // and is resolved to a numeric id at open time.
 //
 // Microphone permission
-// ---------------------
+//
 // macOS gates capture behind TCC. A bundled app needs NSMicrophoneUsageDescription
 // in its Info.plist; a bare command-line binary inherits the permission of the
 // terminal that launched it, and the first attempt prompts the user. If

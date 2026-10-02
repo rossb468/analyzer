@@ -125,7 +125,7 @@ private:
     Source source_;
     std::size_t position_ = 0;
     std::size_t block_;
-    // Sized once, at open, for a full block; pump() only slices them.
+    // Sized once, at open, for a full block; pump() only takes spans of them.
     std::vector<float> input_scratch_;
     std::vector<float> output_scratch_;
     std::vector<float> captured_;

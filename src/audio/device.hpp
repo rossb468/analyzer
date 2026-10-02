@@ -72,8 +72,7 @@ struct DeviceInfo {
 
 }  // namespace analyzer::audio
 
-// DeviceId was hashable in the Rust; it keys the maps a client keeps of open
-// streams.
+// Hashable, so a client can key the map of its open streams by device.
 template <>
 struct std::hash<analyzer::audio::DeviceId> {
     std::size_t operator()(const analyzer::audio::DeviceId& id) const noexcept {

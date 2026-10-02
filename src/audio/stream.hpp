@@ -199,7 +199,7 @@ private:
 // The real-time audio callback.
 //
 // Real-time contract
-// ------------------
+//
 // process() runs on a thread with a hard deadline - typically 2.67 ms at 128
 // frames and 48 kHz. Returning late means the hardware plays whatever was in
 // the buffer, which is an audible click, and for a measurement tool it silently
@@ -221,7 +221,7 @@ private:
 // platform audio API, so one that tried would terminate the process.
 //
 // Threads
-// -------
+//
 // A callback is built on the setup thread, where allocating is fine, handed to
 // a backend, and from then on invoked only by the backend's audio thread until
 // the stream is destroyed. It needs no locking of its own for state only it
@@ -263,10 +263,9 @@ private:
 //
 //   auto callback = make_callback([](AudioBuffers& buffers) { buffers.silence_output(); });
 //
-// This is the C++ counterpart of the Rust blanket impl that made every closure
-// a callback. The callable is copied or moved into the returned object, which
-// is allocated here, at setup time; invoking it afterwards does not allocate.
-// A lambda that mutates its own state must be declared `mutable`.
+// The callable is copied or moved into the returned object, which is allocated
+// here, at setup time; invoking it afterwards does not allocate. A lambda that
+// mutates its own state must be declared `mutable`.
 template <class F>
 std::unique_ptr<AudioCallback> make_callback(F&& function) {
     using Function = std::decay_t<F>;

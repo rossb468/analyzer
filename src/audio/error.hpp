@@ -7,10 +7,10 @@
 // has no way to handle an error and no time to try. That path is noexcept and
 // reports through values instead.
 //
-// One class per case a caller might handle differently - the variants of the
-// Rust error enum - all deriving from AudioError, so a caller that only wants
-// "something went wrong talking to the hardware" catches one type and a caller
-// that wants to offer a fix catches the specific one.
+// One class per case a caller might handle differently, all deriving from
+// AudioError, so a caller that only wants "something went wrong talking to the
+// hardware" catches one type and a caller that wants to offer a fix catches the
+// specific one.
 
 #pragma once
 
