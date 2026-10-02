@@ -16,20 +16,28 @@
 
 namespace analyzer {
 
-// Index of the largest of `values`, the last one when several tie.
+// Index of the largest `projection(value)` over `values`, the last one when
+// several tie. Use a projection to rank by something other than the value
+// itself, such as its magnitude.
 //
 // Ordered by std::strong_order, the IEEE total order: -0.0 sorts below +0.0, and
 // a NaN sorts above every number, so a NaN in the data is reported as the peak
 // rather than silently skipped. `values` must not be empty.
-inline std::size_t last_max_index(std::span<const float> values) noexcept {
+template <class Projection>
+std::size_t last_max_index(std::span<const float> values, Projection projection) noexcept {
     ANALYZER_EXPECTS(!values.empty(), "cannot take the peak of nothing");
     std::size_t best = 0;
     for (std::size_t i = 1; i < values.size(); ++i) {
-        if (std::is_gteq(std::strong_order(values[i], values[best]))) {
+        if (std::is_gteq(std::strong_order(projection(values[i]), projection(values[best])))) {
             best = i;
         }
     }
     return best;
+}
+
+// Index of the largest of `values`, the last one when several tie.
+inline std::size_t last_max_index(std::span<const float> values) noexcept {
+    return last_max_index(values, [](float value) { return value; });
 }
 
 }  // namespace analyzer
