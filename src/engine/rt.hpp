@@ -11,7 +11,7 @@
 // that aborts the process on any allocation, and the same guard runs in CI.
 //
 // How it works
-// ------------
+//
 // C++ lets a program replace the global operator new and operator delete. The
 // target analyzer::alloc_trap does that (src/engine/alloc_trap.cpp): its
 // operator new checks a thread-local "forbidden" depth and aborts with a

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -33,11 +34,9 @@ public:
     // and carries no meaning.
     void process(std::span<const float> input, std::span<float> output,
                  std::size_t delay) noexcept {
-        if (delay > capacity()) {
-            delay = capacity();
-        }
+        delay = std::min(delay, capacity());
         const std::size_t length = buffer_.size();
-        const std::size_t count = input.size() < output.size() ? input.size() : output.size();
+        const std::size_t count = std::min(input.size(), output.size());
         for (std::size_t i = 0; i < count; ++i) {
             buffer_[write_] = input[i];
             write_ = (write_ + 1) % length;
