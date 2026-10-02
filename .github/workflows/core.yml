@@ -14,6 +14,11 @@ on:
       - 'tools/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'src/**'
+      - 'tests/**'
+      - 'third_party/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
       - 'check.sh'
       - '.github/workflows/core.yml'
   pull_request:
@@ -22,6 +27,11 @@ on:
       - 'tools/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'src/**'
+      - 'tests/**'
+      - 'third_party/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
       - 'check.sh'
       - '.github/workflows/core.yml'
   workflow_dispatch:
@@ -124,3 +134,46 @@ jobs:
         run: |
           cargo build -p analyzer-ffi --target aarch64-apple-ios
           cargo build -p analyzer-ffi --target aarch64-apple-ios-sim
+
+  # The C++ core, being ported from the Rust above and run beside it until the
+  # port is complete. Same three platforms, for the same reason.
+  cpp:
+    name: cpp (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          find src tests -name '*.hpp' -o -name '*.cpp' -o -name '*.mm' \
+            | xargs clang-format --dry-run --Werror
+
+      # MSVC's warning set differs enough from GCC and Clang that it is not yet
+      # held to zero; it is built and tested, with warnings shown.
+      - name: Configure
+        shell: bash
+        run: |
+          werror=ON
+          [[ "${{ matrix.os }}" == windows-latest ]] && werror=OFF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DANALYZER_WERROR=$werror
+
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Debug --output-on-failure --parallel 4
+
+      # AddressSanitizer and UndefinedBehaviorSanitizer over the whole suite.
+      # Rust ruled out most of what these catch at compile time; C++ needs them
+      # to run.
+      - name: Test under ASan and UBSan
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DANALYZER_SANITIZE=address
+          cmake --build build-asan --parallel
+          ctest --test-dir build-asan --output-on-failure --parallel 4

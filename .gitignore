@@ -17,3 +17,6 @@ DerivedData/
 /apps/macos/build/
 # Generated beside the header at build time
 /crates/analyzer-ffi/include/module.modulemap
+
+# C++ build trees
+/build/

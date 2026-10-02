@@ -47,4 +47,40 @@ if [[ $status -ne 0 ]]; then
 fi
 
 total=$(grep -E "^test result" "$LOG" | awk -F'[ ;]' '{t+=$4} END {print t}')
-echo "==> ok: $total tests passing"
+echo "==> ok: $total Rust tests passing"
+
+# ---------------------------------------------------------------------------
+# The C++ core. Runs beside the Rust one until the port is complete.
+# ---------------------------------------------------------------------------
+
+CPP_SOURCES=$(find src tests/support tests/dsp tests/cal tests/plot tests/model tests/engine \
+    tests/audio tests/ffi tests/cli -name '*.hpp' -o -name '*.cpp' -o -name '*.h' -o -name '*.mm' \
+    2> /dev/null || true)
+
+echo "==> clang-format"
+# shellcheck disable=SC2086 # one path per word
+clang-format --dry-run --Werror $CPP_SOURCES
+
+CPP_LOG=/tmp/analyzer-cpp-test.log
+for flavour in plain address; do
+    dir="build/check-$flavour"
+    sanitize=""
+    [[ "$flavour" == "address" ]] && sanitize="address"
+    echo "==> C++ build ($flavour)"
+    cmake -S . -B "$dir" -DANALYZER_SANITIZE="$sanitize" > /dev/null
+    cmake --build "$dir" -j "$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)" > "$CPP_LOG" 2>&1 \
+        || { grep -E "error|warning" "$CPP_LOG" | head -40 >&2; exit 1; }
+
+    echo "==> C++ tests ($flavour)"
+    set +e
+    ctest --test-dir "$dir" --output-on-failure -j 4 > "$CPP_LOG" 2>&1
+    status=$?
+    set -e
+    if [[ $status -ne 0 ]]; then
+        echo "C++ TESTS FAILED ($flavour)" >&2
+        grep -E "Failed|\*\*\*" "$CPP_LOG" | head -40 >&2
+        exit "$status"
+    fi
+    grep -E "tests passed" "$CPP_LOG"
+done
+echo "==> ok"
