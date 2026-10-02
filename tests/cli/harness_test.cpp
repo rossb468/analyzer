@@ -4,8 +4,8 @@
 // library, so they exercise the real thing: argument parsing, the audio backend,
 // the allocation trap around the callback, the capture ring, and the analyzer.
 // If the callback ever allocates, the child aborts and every test here fails -
-// which is the point. (The trap is linked into debug builds only, as the Rust
-// harness's global allocator was; see src/cli/CMakeLists.txt.)
+// which is the point. (The trap is linked into debug builds only; see
+// src/cli/CMakeLists.txt.)
 //
 // Ports tools/analyzer-cli/tests/harness.rs.
 

@@ -51,7 +51,7 @@ std::vector<MtwPoint> usable(std::span<const MtwPoint> points) {
     return out;
 }
 
-// x mod 360 in [0, 360), as Rust's rem_euclid gives.
+// x mod 360 in [0, 360), with the sign of the divisor.
 float rem_euclid_360(float x) {
     const float r = std::fmod(x, 360.0f);
     return (r < 0.0f) ? r + 360.0f : r;

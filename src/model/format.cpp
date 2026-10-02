@@ -39,7 +39,7 @@ std::optional<SeparatorAt> find_separator(std::span<const std::byte> bytes) {
     return SeparatorAt{index + 1, index + kSeparatorLine.size()};
 }
 
-void append_line(std::string& header, std::string_view key, std::string_view value) {
+void append_field(std::string& header, std::string_view key, std::string_view value) {
     header += key;
     header += ": ";
     header += value;
@@ -48,7 +48,7 @@ void append_line(std::string& header, std::string_view key, std::string_view val
 
 void write_optional(std::string& header, std::string_view name, std::optional<double> value) {
     if (value) {
-        append_line(header, name, text::shortest(*value));
+        append_field(header, name, text::shortest(*value));
     }
     // Absent means unknown. Writing a placeholder would turn "not measured"
     // into "measured as zero" on the next read.
@@ -170,19 +170,19 @@ std::vector<std::byte> write_measurement(const Measurement& measurement) {
     std::string header;
     header += kMagic;
     header += '\n';
-    append_line(header, "name", escape(measurement.name));
-    append_line(header, "notes", escape(measurement.notes));
-    append_line(header, "id", std::to_string(measurement.id.value));
-    append_line(header, "captured_at", std::to_string(measurement.captured_at));
-    append_line(header, "sample_rate", text::shortest(measurement.sample_rate));
-    append_line(header, "channels", std::to_string(measurement.channels));
-    append_line(header, "kind", kind(measurement.data));
-    append_line(header, "points", std::to_string(point_count(measurement.data)));
+    append_field(header, "name", escape(measurement.name));
+    append_field(header, "notes", escape(measurement.notes));
+    append_field(header, "id", std::to_string(measurement.id.value));
+    append_field(header, "captured_at", std::to_string(measurement.captured_at));
+    append_field(header, "sample_rate", text::shortest(measurement.sample_rate));
+    append_field(header, "channels", std::to_string(measurement.channels));
+    append_field(header, "kind", kind(measurement.data));
+    append_field(header, "points", std::to_string(point_count(measurement.data)));
 
     if (const std::optional<double> spacing = bin_spacing_hz(measurement.data)) {
-        append_line(header, "bin_spacing_hz", text::shortest(*spacing));
+        append_field(header, "bin_spacing_hz", text::shortest(*spacing));
     } else if (const auto* ir = std::get_if<ImpulseResponseData>(&measurement.data)) {
-        append_line(header, "time_zero_samples", text::shortest(ir->time_zero_samples));
+        append_field(header, "time_zero_samples", text::shortest(ir->time_zero_samples));
     }
 
     const References& references = measurement.references;

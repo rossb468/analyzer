@@ -3,12 +3,11 @@
 #include <array>
 #include <cstdint>
 
+#include "base/utf8.hpp"
+
 namespace analyzer::model::detail {
 
 namespace {
-
-// U+FFFD REPLACEMENT CHARACTER in UTF-8.
-constexpr std::string_view kReplacement = "\xEF\xBF\xBD";
 
 bool is_white_space(std::uint32_t code_point) noexcept {
     switch (code_point) {
@@ -130,73 +129,8 @@ std::optional<std::pair<std::string_view, std::string_view>> split_once(std::str
 }
 
 std::string utf8_lossy(std::span<const std::byte> bytes) {
-    std::string out;
-    out.reserve(bytes.size());
-    const auto at = [&](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
-    const auto replace = [&out] { out += kReplacement; };
-
-    std::size_t i = 0;
-    while (i < bytes.size()) {
-        const unsigned char lead = at(i);
-        if (lead < 0x80) {
-            out.push_back(static_cast<char>(lead));
-            ++i;
-            continue;
-        }
-
-        // How many continuation bytes the lead wants, and the range its first
-        // one is restricted to so overlong forms, surrogates and values above
-        // U+10FFFF are refused.
-        std::size_t continuations = 0;
-        unsigned char low = 0x80;
-        unsigned char high = 0xBF;
-        if (lead >= 0xC2 && lead <= 0xDF) {
-            continuations = 1;
-        } else if (lead >= 0xE0 && lead <= 0xEF) {
-            continuations = 2;
-            if (lead == 0xE0) {
-                low = 0xA0;
-            } else if (lead == 0xED) {
-                high = 0x9F;
-            }
-        } else if (lead >= 0xF0 && lead <= 0xF4) {
-            continuations = 3;
-            if (lead == 0xF0) {
-                low = 0x90;
-            } else if (lead == 0xF4) {
-                high = 0x8F;
-            }
-        } else {
-            replace();
-            ++i;
-            continue;
-        }
-
-        // Copy the sequence if it is whole; otherwise one replacement stands
-        // for the part that was valid, and decoding resumes at the byte that
-        // broke it.
-        std::size_t length = 1;
-        bool whole = true;
-        for (std::size_t k = 0; k < continuations; ++k) {
-            const std::size_t index = i + 1 + k;
-            const unsigned char want_low = k == 0 ? low : 0x80;
-            const unsigned char want_high = k == 0 ? high : 0xBF;
-            if (index >= bytes.size() || at(index) < want_low || at(index) > want_high) {
-                whole = false;
-                break;
-            }
-            ++length;
-        }
-        if (whole) {
-            for (std::size_t k = 0; k < length; ++k) {
-                out.push_back(static_cast<char>(at(i + k)));
-            }
-        } else {
-            replace();
-        }
-        i += length;
-    }
-    return out;
+    return analyzer::utf8_lossy(
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
 }
 
 std::string debug_quote(std::string_view text) {

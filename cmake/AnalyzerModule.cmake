@@ -31,8 +31,8 @@ function(analyzer_warnings target)
 endfunction()
 
 # Debug builds turn on the standard library's own bounds checks, so an
-# out-of-range `operator[]` aborts in tests instead of reading garbage. Rust
-# did this unconditionally; here it costs nothing in release.
+# out-of-range `operator[]` aborts in tests instead of reading garbage. They
+# are off in release, where they would cost speed.
 function(analyzer_hardening target)
     target_compile_definitions(${target} PUBLIC
         $<$<CONFIG:Debug>:_GLIBCXX_ASSERTIONS>

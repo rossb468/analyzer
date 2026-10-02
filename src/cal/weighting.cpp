@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "base/units.hpp"
+
 namespace analyzer::cal {
 
 namespace {
@@ -22,9 +24,9 @@ float a_weighting_db(float hz) noexcept {
     const float denominator =
         (f2 + kF1 * kF1) * std::sqrt((f2 + kF2 * kF2) * (f2 + kF3 * kF3)) * (f2 + kF4 * kF4);
     if (denominator <= 0.0f) {
-        return -200.0f;
+        return kWeightingFloorDb;
     }
-    return 20.0f * std::log10(numerator / denominator) + kAOffset;
+    return amplitude_to_db(numerator / denominator) + kAOffset;
 }
 
 float c_weighting_db(float hz) noexcept {
@@ -32,16 +34,16 @@ float c_weighting_db(float hz) noexcept {
     const float numerator = kF4 * kF4 * f2;
     const float denominator = (f2 + kF1 * kF1) * (f2 + kF4 * kF4);
     if (denominator <= 0.0f) {
-        return -200.0f;
+        return kWeightingFloorDb;
     }
-    return 20.0f * std::log10(numerator / denominator) + kCOffset;
+    return amplitude_to_db(numerator / denominator) + kCOffset;
 }
 
 }  // namespace
 
 float db_at(Weighting weighting, float hz) noexcept {
     if (hz <= 0.0f) {
-        return -200.0f;
+        return kWeightingFloorDb;
     }
     switch (weighting) {
         case Weighting::Z: return 0.0f;

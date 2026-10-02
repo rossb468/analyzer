@@ -2,16 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 
 #include "base/contract.hpp"
 #include "base/numeric.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
 namespace {
-
-constexpr double kTau = 2.0 * std::numbers::pi;
 
 // Zero is a fixed point of xorshift, so it must never be the state.
 constexpr std::uint64_t kZeroSeedReplacement = 0x9E37'79B9'7F4A'7C15;
@@ -88,14 +86,14 @@ void Generator::fill(std::span<float> out) noexcept {
 
 void Generator::fill_sine(std::span<float> out) noexcept {
     const float gain = std::clamp(signal_.amplitude, 0.0f, 1.0f);
-    const double increment = kTau * static_cast<double>(signal_.hz) / sample_rate_;
+    const double increment = kTau<double> * static_cast<double>(signal_.hz) / sample_rate_;
     for (float& slot : out) {
         slot = static_cast<float>(std::sin(phase_)) * gain;
         phase_ += increment;
         // Wrapping keeps the accumulator small enough that its resolution
         // never degrades, however long the generator runs.
-        if (phase_ >= kTau) {
-            phase_ -= kTau;
+        if (phase_ >= kTau<double>) {
+            phase_ -= kTau<double>;
         }
     }
 }
@@ -119,8 +117,8 @@ void Generator::fill_pink(std::span<float> out) noexcept {
 
 void Generator::fill_sweep(std::span<float> out) noexcept {
     const float gain = std::clamp(signal_.amplitude, 0.0f, 1.0f);
-    // fmax rather than std::max: it ignores a NaN argument, as Rust's f64::max
-    // did, so a NaN frequency or duration falls back to the floor instead of
+    // fmax rather than std::max: it returns the other argument when one is NaN,
+    // so a NaN frequency or duration falls back to the floor instead of
     // propagating.
     const double start = std::fmax(static_cast<double>(signal_.start_hz), 1e-3);
     const double end = std::fmax(static_cast<double>(signal_.end_hz), start + 1e-3);
@@ -146,7 +144,7 @@ void Generator::fill_sweep(std::span<float> out) noexcept {
         // geometrically, so equal time is spent in every octave.
         const double t = static_cast<double>(position_) / sample_rate_;
         const double phase =
-            (kTau * start * duration / ratio) * (std::exp(t / duration * ratio) - 1.0);
+            (kTau<double> * start * duration / ratio) * (std::exp(t / duration * ratio) - 1.0);
         slot = static_cast<float>(std::sin(phase)) * gain;
         ++position_;
     }

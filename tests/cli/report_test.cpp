@@ -91,14 +91,16 @@ TEST(Report, NamesWindowsAndAveragingAsTheRustCoreDid) {
     EXPECT_EQ(describe(dsp::WindowKind::blackman_harris()), "BlackmanHarris");
     EXPECT_EQ(describe(dsp::WindowKind::flat_top()), "FlatTop");
     EXPECT_EQ(describe(dsp::WindowKind::tukey(0.25f)), "Tukey { alpha: 0.25 }");
+    // A whole number keeps its `.0`, as Rust's `{:?}` does.
+    EXPECT_EQ(describe(dsp::WindowKind::tukey(1.0f)), "Tukey { alpha: 1.0 }");
     EXPECT_EQ(describe(dsp::Averaging::none()), "None");
     EXPECT_EQ(describe(dsp::Averaging::infinite()), "Infinite");
     EXPECT_EQ(describe(dsp::Averaging::peak_hold()), "PeakHold");
     EXPECT_EQ(describe(dsp::Averaging::exponential(0.2f)), "Exponential { alpha: 0.2 }");
 }
 
-// Rust's max_by keeps the last of several equal maxima. A silent spectrum is
-// all equal, so the answer is its top bin rather than DC.
+// The last of several equal maxima wins (std::max_element would pick the first). A silent spectrum
+// is all equal, so the answer is its top bin rather than DC.
 TEST(Report, PeakOfAFlatSpectrumIsTheLastBin) {
     engine::SpectrumFrame silent = frame();
     silent.bins.assign(4, -200.0f);

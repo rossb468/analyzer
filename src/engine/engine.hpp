@@ -22,7 +22,7 @@
 // nothing anywhere may allocate on the audio side.
 //
 // Reconfiguration
-// ---------------
+//
 // There is none. Changing FFT size, window or channel count means destroying
 // the engine and starting another. Live reconfiguration would need the analysis
 // buffers resized underneath a running audio callback, and the resulting

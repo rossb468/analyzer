@@ -2,10 +2,9 @@
 //
 // Everything that can go wrong in the CLI - a flag that does not parse, a file
 // that will not open, a measurement that fails - ends the same way: a message
-// on stderr behind "analyzer-cli: " and exit status 1. The Rust passed a String
-// up through Result; this is the C++ spelling of the same thing. Errors from
-// the other modules (model::ModelError, audio::AudioError) are caught alongside
-// it in run() and reported by their what() text.
+// on stderr behind "analyzer-cli: " and exit status 1. Errors from the other
+// modules (model::ModelError, audio::AudioError) are caught alongside it in
+// run() and reported by their what() text.
 
 #pragma once
 

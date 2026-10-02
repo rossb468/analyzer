@@ -128,8 +128,8 @@ public:
     static SpectrumFrame initial_frame(const EngineConfig& config) {
         const dsp::SpectrumAnalyzer probe(config.spectrum);
         SpectrumFrame frame;
-        frame.bins.assign(probe.bins(), dsp::kDbFloor);
-        frame.average_bins.assign(probe.bins(), dsp::kDbFloor);
+        frame.bins.assign(probe.bins(), dsp::kSpectrumFloorDb);
+        frame.average_bins.assign(probe.bins(), dsp::kSpectrumFloorDb);
         frame.bin_spacing_hz = probe.bin_spacing_hz();
         frame.sample_rate = config.spectrum.sample_rate;
         // Reserved, not sized: in spectrum mode these stay empty, and empty is

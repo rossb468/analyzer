@@ -5,6 +5,7 @@
 #include <numeric>
 #include <utility>
 
+#include "base/lines.hpp"
 #include "base/number_text.hpp"
 #include "model/text.hpp"
 
@@ -18,9 +19,9 @@ struct Difference {
 };
 
 // The (frequency, value) with the largest magnitude. Of several equally large
-// the last wins, as Rust's `max_by` does, because which frequency is reported
-// when two tie is part of the report.
-template <typename Select>
+// the last wins, because which frequency is reported when two tie is part of
+// the report (std::max_element would pick the first).
+template <class Select>
 Difference worst(const std::vector<Difference>& differences, Select select) {
     Difference best{0.0, 0.0};
     bool first = true;
@@ -34,7 +35,7 @@ Difference worst(const std::vector<Difference>& differences, Select select) {
     return best;
 }
 
-template <typename Select>
+template <class Select>
 double rms(const std::vector<Difference>& differences, Select select) {
     double sum = 0.0;
     for (const Difference& difference : differences) {
@@ -52,17 +53,14 @@ bool is_column_separator(char c) noexcept {
     return c == '\t' || c == ',' || c == ';' || c == ' ';
 }
 
-void line(std::string& out, const std::string& text) {
-    out += text;
-    out += '\n';
-}
+using text::append_line;
 
 }  // namespace
 
-Response Response::parse(std::string_view text) {
+Response Response::parse(std::string_view contents) {
     Response response;
 
-    for (const std::string_view raw : detail::lines(text)) {
+    for (const std::string_view raw : detail::lines(contents)) {
         const std::string_view row = detail::trim(raw);
         if (row.empty() || is_comment(row.front())) {
             continue;
@@ -139,28 +137,29 @@ bool Response::has_exact(double hz) const {
 
 std::string Comparison::report() const {
     std::string out;
-    line(out, "# spectrum comparison");
-    line(out, "# band: " + text::fixed(from_hz, 1) + " Hz to " + text::fixed(to_hz, 1) + " Hz");
-    line(out, "# points: " + std::to_string(compared) + " (" + std::to_string(interpolated) +
-                  " interpolated)");
+    append_line(out, "# spectrum comparison");
+    append_line(out,
+                "# band: " + text::fixed(from_hz, 1) + " Hz to " + text::fixed(to_hz, 1) + " Hz");
+    append_line(out, "# points: " + std::to_string(compared) + " (" + std::to_string(interpolated) +
+                         " interpolated)");
     if (compared == 0) {
-        line(out, "#");
-        line(out, "# nothing overlapped. Check the two files cover the same band.");
+        append_line(out, "#");
+        append_line(out, "# nothing overlapped. Check the two files cover the same band.");
         return out;
     }
-    line(out, "#");
-    line(out, "# as measured");
-    line(out, "#   max deviation   " + text::signed_fixed(max_deviation, 4) + " dB at " +
-                  text::fixed(max_deviation_hz, 1) + " Hz");
-    line(out, "#   rms deviation   " + text::fixed(rms_deviation, 4) + " dB");
-    line(out, "#");
-    line(out, "# constant offset  " + text::signed_fixed(mean_offset, 4) +
-                  " dB  (a reference convention, not a defect)");
-    line(out, "#");
-    line(out, "# with that offset removed - the number that matters");
-    line(out, "#   max deviation   " + text::signed_fixed(max_deviation_after_offset, 4) +
-                  " dB at " + text::fixed(max_deviation_after_offset_hz, 1) + " Hz");
-    line(out, "#   rms deviation   " + text::fixed(rms_deviation_after_offset, 4) + " dB");
+    append_line(out, "#");
+    append_line(out, "# as measured");
+    append_line(out, "#   max deviation   " + text::signed_fixed(max_deviation, 4) + " dB at " +
+                         text::fixed(max_deviation_hz, 1) + " Hz");
+    append_line(out, "#   rms deviation   " + text::fixed(rms_deviation, 4) + " dB");
+    append_line(out, "#");
+    append_line(out, "# constant offset  " + text::signed_fixed(mean_offset, 4) +
+                         " dB  (a reference convention, not a defect)");
+    append_line(out, "#");
+    append_line(out, "# with that offset removed - the number that matters");
+    append_line(out, "#   max deviation   " + text::signed_fixed(max_deviation_after_offset, 4) +
+                         " dB at " + text::fixed(max_deviation_after_offset_hz, 1) + " Hz");
+    append_line(out, "#   rms deviation   " + text::fixed(rms_deviation_after_offset, 4) + " dB");
     return out;
 }
 

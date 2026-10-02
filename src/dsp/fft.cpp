@@ -3,9 +3,9 @@
 #include <cstdlib>
 #include <new>
 
-#include "base/contract.hpp"
-
 #include "kiss_fftr.h"
+
+#include "base/contract.hpp"
 
 namespace analyzer::dsp {
 

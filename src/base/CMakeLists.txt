@@ -1,4 +1,4 @@
-# Contract checks, numeric conversions and Rust-compatible number text: the
+# Contract checks, numeric conversions and number text that matches the established file formats: the
 # small pieces every other module needs. A real library rather than headers
 # only, because the number formatting and parsing are too big to inline.
 add_library(analyzer_base STATIC number_text.cpp)

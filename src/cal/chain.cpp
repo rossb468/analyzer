@@ -3,6 +3,8 @@
 #include <cmath>
 #include <utility>
 
+#include "base/units.hpp"
+
 namespace analyzer::cal {
 
 Calibration Calibration::from_reference_tone(float measured_dbfs, float reference_spl_db) noexcept {
@@ -24,8 +26,8 @@ std::optional<Calibration> Calibration::from_signal_chain(float sensitivity_mv_p
     }
     // Volts at the converter when the capsule sees 1 Pa, i.e. 94 dB SPL.
     const float volts_at_one_pascal =
-        (sensitivity_mv_per_pa / 1000.0f) * std::pow(10.0f, preamp_gain_db / 20.0f);
-    const float dbfs_at_one_pascal = 20.0f * std::log10(volts_at_one_pascal / full_scale_volts);
+        (sensitivity_mv_per_pa / 1000.0f) * db_to_amplitude(preamp_gain_db);
+    const float dbfs_at_one_pascal = amplitude_to_db(volts_at_one_pascal / full_scale_volts);
     Calibration cal;
     cal.offset_db_ = kCalibratorSplDb - dbfs_at_one_pascal;
     return cal;

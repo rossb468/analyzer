@@ -11,8 +11,9 @@
 #include <string>
 #include <vector>
 
+#include "base/lines.hpp"
+#include "base/number_text.hpp"
 #include "base/numeric.hpp"
-#include "cli/text.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/meter.hpp"
 #include "dsp/octave.hpp"
@@ -45,10 +46,7 @@ double seconds_since(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
-void line(std::string& out, const std::string& text = "") {
-    out += text;
-    out += '\n';
-}
+using text::append_line;
 
 std::string verdict(double duty) {
     return duty < kDutyTarget ? "PASS" : "FAIL";
@@ -95,8 +93,8 @@ std::size_t display_reads(double seconds) {
 
 // Duty cycle of the spectrum chain across the FFT sizes a user can pick.
 void spectrum_duty(std::string& out, double seconds) {
-    line(out, "spectrum analysis, 75% overlap");
-    line(out, table_header());
+    append_line(out, "spectrum analysis, 75% overlap");
+    append_line(out, table_header());
 
     const auto total = saturating_cast<std::size_t>(static_cast<double>(kRate) * seconds);
     const std::vector<float> signal = audio(total, 1);
@@ -108,7 +106,7 @@ void spectrum_duty(std::string& out, double seconds) {
         // happened. Skip loudly rather than printing a number that looks like a
         // result.
         if (const auto note = too_short(size, dsp::Overlap::ThreeQuarters, seconds)) {
-            line(out, "  " + text::pad_left(std::to_string(size), 7) + "  " + *note);
+            append_line(out, "  " + text::pad_left(std::to_string(size), 7) + "  " + *note);
             continue;
         }
         dsp::SpectrumAnalyzer analyzer(dsp::SpectrumConfig{
@@ -134,16 +132,16 @@ void spectrum_duty(std::string& out, double seconds) {
         const double elapsed = seconds_since(start);
 
         const double duty = elapsed / seconds;
-        line(out, table_row(size, static_cast<double>(frames) / seconds, duty));
+        append_line(out, table_row(size, static_cast<double>(frames) / seconds, duty));
     }
-    line(out);
+    append_line(out);
 }
 
 // The transfer function does two FFTs per frame plus the cross-spectrum, so it
 // is the most expensive thing in Milestone 1.
 void transfer_duty(std::string& out, double seconds) {
-    line(out, "transfer function, two channels, 75% overlap");
-    line(out, table_header());
+    append_line(out, "transfer function, two channels, 75% overlap");
+    append_line(out, table_header());
 
     const auto total = saturating_cast<std::size_t>(static_cast<double>(kRate) * seconds);
     const std::vector<float> reference = audio(total, 2);
@@ -151,7 +149,7 @@ void transfer_duty(std::string& out, double seconds) {
 
     for (const std::size_t size : kTransferSizes) {
         if (const auto note = too_short(size, dsp::Overlap::ThreeQuarters, seconds)) {
-            line(out, "  " + text::pad_left(std::to_string(size), 7) + "  " + *note);
+            append_line(out, "  " + text::pad_left(std::to_string(size), 7) + "  " + *note);
             continue;
         }
         dsp::TransferFunction tf(dsp::TransferConfig{
@@ -180,13 +178,13 @@ void transfer_duty(std::string& out, double seconds) {
         const double elapsed = seconds_since(start);
 
         const double duty = elapsed / seconds;
-        line(out, table_row(size, static_cast<double>(frames) / seconds, duty));
+        append_line(out, table_row(size, static_cast<double>(frames) / seconds, duty));
     }
-    line(out);
+    append_line(out);
 }
 
 void meter_duty(std::string& out, double seconds) {
-    line(out, "level meters, per-sample filtering");
+    append_line(out, "level meters, per-sample filtering");
     const auto total = saturating_cast<std::size_t>(static_cast<double>(kRate) * seconds);
     const std::vector<float> signal = audio(total, 4);
 
@@ -199,18 +197,18 @@ void meter_duty(std::string& out, double seconds) {
                 offset, std::min<std::size_t>(512, signal.size() - offset)));
         }
         const double duty = seconds_since(start) / seconds;
-        // Rust's derived Debug writes the name without honouring the `{:>7?}`
-        // width it was printed with, so the name is left unpadded to match.
-        line(out, "  " + std::string(dsp::to_string(weighting)) + "  " +
-                      text::pad_left(text::fixed(duty, 5), 10) + "  " +
-                      text::pad_left(text::fixed(1.0 / duty, 0) + "x", 8) + "  " +
-                      text::pad_left(verdict(duty), 7));
+        // The name is left unpadded, deliberately: the golden output records it
+        // that way.
+        append_line(out, "  " + std::string(dsp::to_string(weighting)) + "  " +
+                             text::pad_left(text::fixed(duty, 5), 10) + "  " +
+                             text::pad_left(text::fixed(1.0 / duty, 0) + "x", 8) + "  " +
+                             text::pad_left(verdict(duty), 7));
     }
-    line(out);
+    append_line(out);
 }
 
 void octave_duty(std::string& out, double seconds) {
-    line(out, "octave banding, applied at 120 Hz");
+    append_line(out, "octave banding, applied at 120 Hz");
     const std::vector<float> bins(4097, -60.0f);
     const float spacing = kRate / 8192.0f;
 
@@ -224,12 +222,12 @@ void octave_duty(std::string& out, double seconds) {
             bands.apply(bins, spacing, levels);
         }
         const double duty = seconds_since(start) / seconds;
-        line(out, "  1/" + text::pad_right(std::to_string(fraction), 5) + " " +
-                      text::pad_left(std::to_string(bands.size()), 4) + " bands  " +
-                      text::pad_left(text::fixed(duty, 5), 10) + "  " +
-                      text::pad_left(verdict(duty), 7));
+        append_line(out, "  1/" + text::pad_right(std::to_string(fraction), 5) + " " +
+                             text::pad_left(std::to_string(bands.size()), 4) + " bands  " +
+                             text::pad_left(text::fixed(duty, 5), 10) + "  " +
+                             text::pad_left(verdict(duty), 7));
     }
-    line(out);
+    append_line(out);
 }
 
 // Push audio through the ring at wall-clock rate and count what gets dropped.
@@ -237,7 +235,7 @@ void octave_duty(std::string& out, double seconds) {
 // This is the target that matters most, because an overrun is not a slow frame
 // - it is a hole in the data that makes the measurement wrong.
 void ring_soak(std::string& out, double seconds) {
-    line(out, "ring soak, 128-frame blocks at wall-clock rate");
+    append_line(out, "ring soak, 128-frame blocks at wall-clock rate");
 
     const std::size_t block_frames = 128;
     auto ring = engine::capture_ring(2, 8192);
@@ -281,24 +279,25 @@ void ring_soak(std::string& out, double seconds) {
     const double budget_micros =
         static_cast<double>(block_frames) / static_cast<double>(kRate) * 1e6;
 
-    line(out, "  blocks:          " + std::to_string(blocks));
-    line(out, "  overruns:        " + std::to_string(sink.overruns()));
-    line(out, "  worst callback:  " +
-                  text::fixed(std::chrono::duration<double>(worst_callback).count() * 1e6, 1) +
-                  " us (budget " + text::fixed(budget_micros, 0) + " us)");
-    line(out, "  total duty:      " + text::fixed(elapsed / seconds, 4));
-    line(out, std::string("  verdict:         ") + (sink.overruns() == 0 ? "PASS" : "FAIL"));
+    append_line(out, "  blocks:          " + std::to_string(blocks));
+    append_line(out, "  overruns:        " + std::to_string(sink.overruns()));
+    append_line(out,
+                "  worst callback:  " +
+                    text::fixed(std::chrono::duration<double>(worst_callback).count() * 1e6, 1) +
+                    " us (budget " + text::fixed(budget_micros, 0) + " us)");
+    append_line(out, "  total duty:      " + text::fixed(elapsed / seconds, 4));
+    append_line(out, std::string("  verdict:         ") + (sink.overruns() == 0 ? "PASS" : "FAIL"));
 }
 
 }  // namespace
 
 std::string run_bench(double seconds) {
     std::string out;
-    line(out, "analyzer benchmarks");
-    line(out, "  sample rate: " + text::display(kRate) + " Hz");
-    line(out, "  audio per case: " + text::fixed(seconds, 1) + " s");
-    line(out, "  duty cycle = CPU seconds per second of audio; target < " +
-                  text::display(kDutyTarget) + "\n");
+    append_line(out, "analyzer benchmarks");
+    append_line(out, "  sample rate: " + text::shortest(kRate) + " Hz");
+    append_line(out, "  audio per case: " + text::fixed(seconds, 1) + " s");
+    append_line(out, "  duty cycle = CPU seconds per second of audio; target < " +
+                         text::shortest(kDutyTarget) + "\n");
 
     spectrum_duty(out, seconds);
     transfer_duty(out, seconds);

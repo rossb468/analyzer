@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "base/contract.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
@@ -154,8 +155,7 @@ void SpectrumAnalyzer::write_db_fs(std::span<float> out) const noexcept {
     for (std::size_t k = 0; k < out.size(); ++k) {
         // Full-scale sine has mean square 0.5, so 2 * power normalises it to
         // unity at 0 dBFS.
-        out[k] =
-            power_[k] > 0.0f ? std::max(10.0f * std::log10(2.0f * power_[k]), kDbFloor) : kDbFloor;
+        out[k] = power_to_db(2.0f * power_[k], kSpectrumFloorDb);
     }
 }
 

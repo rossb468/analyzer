@@ -64,13 +64,6 @@ std::string_view as_key(SampleDepth depth) noexcept;
 // "32" and "float".
 std::optional<SampleDepth> depth_from_key(std::string_view key) noexcept;
 
-// Fixed so a generated file is reproducible.
-//
-// Two runs of the same command must produce the same bytes, or a parity
-// comparison cannot be repeated and a noise measurement cannot be compared
-// against itself. This is the same seed the engine uses for the same reason.
-inline constexpr std::uint64_t kGeneratorSeed = 0x5EED'5EED'5EED'5EEDull;
-
 // Render `signal` for `seconds` at `sample_rate`.
 //
 // Returns the samples rather than writing them, so a caller can inspect,

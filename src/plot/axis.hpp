@@ -38,7 +38,7 @@ struct Tick {
 // A small value type: copy it freely, resize or zoom it by building a new one.
 class FrequencyAxis {
 public:
-    // Build an axis spanning min_hz..=max_hz across `width` pixels.
+    // Build an axis spanning min_hz to max_hz across `width` pixels.
     //
     // Both frequencies must be positive, max_hz must be above min_hz, and
     // `width` must be positive. A log axis through zero has no meaning, and
@@ -95,7 +95,7 @@ std::string format_frequency(float hz);
 // Linear decibel axis, with y increasing downwards.
 class LevelAxis {
 public:
-    // Build an axis spanning min_db..=max_db across `height` pixels.
+    // Build an axis spanning min_db to max_db across `height` pixels.
     //
     // max_db must be above min_db, and `height` must be positive.
     LevelAxis(float min_db, float max_db, float height);

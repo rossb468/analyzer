@@ -14,6 +14,9 @@
 
 namespace analyzer::cal {
 
+// What db_at() reports where a weighting is undefined: at or below zero hertz.
+inline constexpr float kWeightingFloorDb = -200.0f;
+
 // Which weighting to apply.
 enum class Weighting {
     // No weighting. The honest choice for measurement work, and the default
@@ -28,8 +31,8 @@ enum class Weighting {
 
 // Weighting in decibels at `hz`.
 //
-// Returns a large negative value (-200) at or below zero hertz rather than a
-// NaN, so a caller summing weighted bins cannot poison its total with DC.
+// Returns kWeightingFloorDb at or below zero hertz rather than a NaN, so a
+// caller summing weighted bins cannot poison its total with DC.
 float db_at(Weighting weighting, float hz) noexcept;
 
 // Short label for display.

@@ -8,6 +8,7 @@
 #include <numbers>
 
 #include "base/numeric.hpp"
+#include "base/units.hpp"
 #include "dsp/complex.hpp"
 #include "dsp/fft.hpp"
 
@@ -59,7 +60,7 @@ std::size_t noise_floor_index(std::span<const float> samples) {
         return samples.size();
     }
 
-    const float threshold = floor * std::pow(10.0f, kMarginDb / 10.0f);
+    const float threshold = floor * db_to_power(kMarginDb);
     for (std::size_t i = energy.size(); i-- > 0;) {
         if (energy[i] > threshold) {
             // One block of headroom past the last clearly-signal block.
@@ -206,15 +207,13 @@ std::optional<GatedResponse> gated_response(const ImpulseResponse& ir, const Gat
     std::vector<Complex32> spectrum(fft.bins());
     fft.forward(padded, spectrum);
 
-    constexpr float kDegreesPerRadian = 180.0f / std::numbers::pi_v<float>;
     GatedResponse response;
     response.magnitude_db.reserve(spectrum.size());
     response.phase_degrees.reserve(spectrum.size());
     for (const Complex32 bin : spectrum) {
         const float magnitude = std::abs(bin);
-        response.magnitude_db.push_back(magnitude > 0.0f ? 20.0f * std::log10(magnitude)
-                                                         : kIrFloorDb);
-        response.phase_degrees.push_back(std::arg(bin) * kDegreesPerRadian);
+        response.magnitude_db.push_back(magnitude > 0.0f ? amplitude_to_db(magnitude) : kIrFloorDb);
+        response.phase_degrees.push_back(std::arg(bin) * kDegreesPerRadian<float>);
     }
     response.bin_spacing_hz = ir.sample_rate / static_cast<float>(fft_size);
     response.resolution_hz = gate.resolution_hz();
@@ -256,7 +255,7 @@ std::vector<float> schroeder_decay(const ImpulseResponse& ir) {
         return std::vector<float>(curve.size(), kIrFloorDb);
     }
     for (float& value : curve) {
-        value = value > 0.0f ? std::max(10.0f * std::log10(value / total), kIrFloorDb) : kIrFloorDb;
+        value = power_to_db(value / total, kIrFloorDb);
     }
     return curve;
 }

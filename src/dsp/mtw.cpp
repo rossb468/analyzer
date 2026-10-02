@@ -3,16 +3,14 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
-#include <numbers>
 
 #include "base/contract.hpp"
 #include "base/numeric.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
 namespace {
-
-constexpr float kDegreesPerRadian = 180.0f / std::numbers::pi_v<float>;
 
 // x mod 360 in [0, 360), the sign of the result following the divisor rather
 // than the dividend as std::fmod would have it.
@@ -155,10 +153,10 @@ void MultiTimeWindow::resolve() noexcept {
         const float ca = lower < band.coherence.size() ? band.coherence[lower] : 0.0f;
         const float cb = lower + 1 < band.coherence.size() ? band.coherence[lower + 1] : ca;
 
-        point.magnitude_db =
-            (magnitude > 0.0f) ? std::max(20.0f * std::log10(magnitude), kMtwFloorDb) : kMtwFloorDb;
+        point.magnitude_db = amplitude_to_db(magnitude, kMtwFloorDb);
         // Re-wrap, since arg(a) + step can leave the principal range.
-        point.phase_degrees = wrap_degrees_positive(angle * kDegreesPerRadian + 180.0f) - 180.0f;
+        point.phase_degrees =
+            wrap_degrees_positive(angle * kDegreesPerRadian<float> + 180.0f) - 180.0f;
         point.coherence = std::clamp(ca + (cb - ca) * fraction, 0.0f, 1.0f);
         point.fft_size = band.engine.size();
     }

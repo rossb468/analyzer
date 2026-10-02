@@ -1,7 +1,7 @@
 // Conversions between the C enums and structs and the core's own types.
 //
 // Values arrive from C, where nothing stops a caller passing an integer that is
-// not an enumerator. Rust treated that as undefined behaviour; here every
+// not an enumerator. Switching on such a value is not well defined, so every
 // conversion ends in a defined answer, the default a fresh session would use,
 // rather than falling off the end of a switch.
 

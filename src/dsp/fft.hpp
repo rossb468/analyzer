@@ -62,8 +62,8 @@ protected:
 
 // Portable Fft over KissFFT.
 //
-// Any even size of at least 2 works, as with the Rust `realfft` this replaces.
-// Powers of two are fastest, and are all the analysis uses.
+// Any even size of at least 2 works. Powers of two are fastest, and are all the
+// analysis uses.
 class RealFft final : public Fft {
 public:
     // Plan transforms of `size` real samples. `size` must be even and at least

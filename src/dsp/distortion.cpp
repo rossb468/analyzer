@@ -8,6 +8,8 @@
 #include <utility>
 
 #include "base/numeric.hpp"
+#include "base/peak.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
@@ -17,35 +19,21 @@ std::size_t abs_diff(std::size_t a, std::size_t b) noexcept {
     return a > b ? a - b : b - a;
 }
 
-// Index of the largest of power_bins[first..last], the *last* one on a tie, and
-// ordering NaN above everything. That is what Rust's max_by with total_cmp
-// returned; std::max_element returns the first of equals, which would move the
-// reported peak on a flat-topped spectrum.
-std::size_t last_max_index(std::span<const float> power_bins, std::size_t first,
-                           std::size_t last) noexcept {
-    std::size_t best = first;
-    for (std::size_t bin = first + 1; bin <= last; ++bin) {
-        if (std::is_gteq(std::strong_order(power_bins[bin], power_bins[best]))) {
-            best = bin;
-        }
-    }
-    return best;
-}
-
 // Loudest bin within `window` of `centre`, skipping DC.
 std::optional<std::size_t> peak_near(std::span<const float> power_bins, std::size_t centre,
                                      std::size_t window) noexcept {
     const std::size_t low = std::max<std::size_t>(centre > window ? centre - window : 0, 1);
     // `centre` can be the largest size_t when the caller's frequency divided by
     // its bin spacing saturated, so `centre + window` is compared by
-    // subtraction rather than risking a wrap to a small number. (Rust would
-    // have panicked on that overflow in a debug build.)
+    // subtraction rather than risking an unsigned wrap to a small number.
     const std::size_t last = power_bins.size() - 1;
     const std::size_t high = (centre >= last || window >= last - centre) ? last : centre + window;
     if (low > high) {
         return std::nullopt;
     }
-    return last_max_index(power_bins, low, high);
+    // The last of several equal maxima, so a flat-topped peak reports its top
+    // edge; see base/peak.hpp.
+    return low + last_max_index(power_bins.subspan(low, high - low + 1));
 }
 
 // Highest bin a lobe around `centre` reaches, clamped to the spectrum.
@@ -91,20 +79,12 @@ void mark(std::vector<bool>& claimed, std::size_t centre, std::size_t lobe) {
     }
 }
 
-// Power to decibels.
-float to_db(float power) noexcept {
-    if (power > 0.0f) {
-        return std::max(10.0f * std::log10(power), kDistortionFloorDb);
-    }
-    return kDistortionFloorDb;
+float power_db(float power) noexcept {
+    return power_to_db(power, kDistortionFloorDb);
 }
 
-// An amplitude ratio to decibels.
-float amplitude_db(float ratio) noexcept {
-    if (ratio > 0.0f) {
-        return std::max(20.0f * std::log10(ratio), kDistortionFloorDb);
-    }
-    return kDistortionFloorDb;
+float ratio_db(float amplitude_ratio) noexcept {
+    return amplitude_to_db(amplitude_ratio, kDistortionFloorDb);
 }
 
 }  // namespace
@@ -152,7 +132,7 @@ std::optional<Distortion> analyse_distortion(std::span<const float> power_bins,
         }
         fundamental_bin = *peak;
     } else {
-        fundamental_bin = last_max_index(power_bins, 1, power_bins.size() - 1);
+        fundamental_bin = 1 + last_max_index(power_bins.subspan(1));
     }
     if (fundamental_bin == 0) {
         return std::nullopt;
@@ -197,8 +177,8 @@ std::optional<Distortion> analyse_distortion(std::span<const float> power_bins,
         harmonics.push_back(Harmonic{
             .order = order,
             .hz = centroid_hz(power_bins, bin, config.lobe_bins, bin_spacing_hz),
-            .level_db = to_db(power),
-            .relative_db = amplitude_db(ratio),
+            .level_db = power_db(power),
+            .relative_db = ratio_db(ratio),
             .percent = ratio * 100.0f,
         });
     }
@@ -235,13 +215,13 @@ std::optional<Distortion> analyse_distortion(std::span<const float> power_bins,
 
     Distortion result;
     result.fundamental_hz = refined_hz;
-    result.fundamental_db = to_db(fundamental_power);
+    result.fundamental_db = power_db(fundamental_power);
     result.harmonics = std::move(harmonics);
     result.thd_percent = thd_ratio * 100.0f;
-    result.thd_db = amplitude_db(thd_ratio);
+    result.thd_db = ratio_db(thd_ratio);
     result.thd_n_percent = thd_n_ratio * 100.0f;
-    result.thd_n_db = amplitude_db(thd_n_ratio);
-    result.noise_floor_db = to_db(noise_floor);
+    result.thd_n_db = ratio_db(thd_n_ratio);
+    result.noise_floor_db = power_db(noise_floor);
     result.orders_above_nyquist = above_nyquist;
     return result;
 }

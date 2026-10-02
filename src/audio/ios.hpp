@@ -13,7 +13,7 @@
 // AudioUnitRender, hands both sides to the AudioCallback, and returns.
 //
 // Measurement mode
-// ----------------
+//
 // The session is put in AVAudioSessionModeMeasurement. Without it iOS applies
 // automatic gain control and voice processing to the microphone, and every
 // measurement taken through it is a measurement of Apple's signal chain.
@@ -21,7 +21,7 @@
 // A2DP output adds a large latency that varies from one connection to the next.
 //
 // Microphone permission
-// ---------------------
+//
 // iOS gates capture behind a user prompt that only the app can raise, and the
 // app needs NSMicrophoneUsageDescription in its Info.plist. Asking is the
 // client's job, before it starts a session. If permission is refused the unit
@@ -29,7 +29,7 @@
 // same symptom as macOS, so the caller must check for it in the same way.
 //
 // Interruptions
-// -------------
+//
 // A phone call or another app taking the session stops the unit without
 // telling it. The client observes AVAudioSession interruption and route-change
 // notifications, which are application lifecycle rather than analysis, and

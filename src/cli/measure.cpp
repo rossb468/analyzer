@@ -7,11 +7,13 @@
 #include <utility>
 #include <vector>
 
+#include "base/lines.hpp"
+#include "base/number_text.hpp"
 #include "base/numeric.hpp"
 #include "cli/error.hpp"
 #include "cli/source.hpp"
-#include "cli/text.hpp"
 #include "dsp/deconv.hpp"
+#include "dsp/delay.hpp"
 #include "dsp/generator.hpp"
 #include "dsp/ir.hpp"
 
@@ -19,13 +21,7 @@ namespace analyzer::cli {
 
 namespace {
 
-// Speed of sound used to turn a delay into a distance.
-constexpr float kSpeedOfSound = 343.0f;
-
-void line(std::string& out, const std::string& text) {
-    out += text;
-    out += '\n';
-}
+using text::append_line;
 
 // The synthetic room the demo measures.
 //
@@ -112,10 +108,10 @@ struct SyntheticRoom {
 
 void report_impulse(std::string& out, const dsp::ImpulseResponse& ir) {
     const float arrival_seconds = ir.peak_samples / ir.sample_rate;
-    line(out, "#   direct arrival     " + text::fixed(arrival_seconds * 1000.0f, 2) + " ms (" +
-                  text::fixed(arrival_seconds * kSpeedOfSound, 2) + " m)");
-    line(out, "#   impulse length     " + std::to_string(ir.samples.size()) + " samples (" +
-                  text::fixed(ir.duration_seconds(), 3) + " s)");
+    append_line(out, "#   direct arrival     " + text::fixed(arrival_seconds * 1000.0f, 2) +
+                         " ms (" + text::fixed(arrival_seconds * dsp::kSpeedOfSound, 2) + " m)");
+    append_line(out, "#   impulse length     " + std::to_string(ir.samples.size()) + " samples (" +
+                         text::fixed(ir.duration_seconds(), 3) + " s)");
 
     // Discrete arrivals standing clear of the local background, which is what a
     // reflection looks like in an impulse response.
@@ -135,11 +131,11 @@ void report_impulse(std::string& out, const dsp::ImpulseResponse& ir) {
         if (!is_local_peak) {
             continue;
         }
-        line(out,
-             "#   reflection         +" +
-                 text::fixed(
-                     (static_cast<float>(index) - ir.peak_samples) / ir.sample_rate * 1000.0f, 2) +
-                 " ms at " + text::fixed(magnitude / peak * 100.0f, 0) + "%");
+        append_line(out, "#   reflection         +" +
+                             text::fixed((static_cast<float>(index) - ir.peak_samples) /
+                                             ir.sample_rate * 1000.0f,
+                                         2) +
+                             " ms at " + text::fixed(magnitude / peak * 100.0f, 0) + "%");
         ++found;
         if (found >= 6) {
             break;
@@ -155,15 +151,15 @@ void report_reverberation(std::string& out, const dsp::ImpulseResponse& ir) {
         return value ? label + " " + text::fixed(*value, 3) + " s"
                      : label + " (insufficient range)";
     };
-    line(out, "#   " + show("EDT               ", rt.edt));
-    line(out, "#   " + show("T20               ", rt.t20));
-    line(out, "#   " + show("T30               ", rt.t30));
+    append_line(out, "#   " + show("EDT               ", rt.edt));
+    append_line(out, "#   " + show("T20               ", rt.t20));
+    append_line(out, "#   " + show("T30               ", rt.t30));
 
     if (const auto spread = rt.spread()) {
         const char* verdict =
             *spread < 0.1f ? "consistent" : "estimates disagree - the decay is not a straight line";
-        line(out,
-             "#   agreement          " + text::fixed(*spread * 100.0f, 1) + "% (" + verdict + ")");
+        append_line(out, "#   agreement          " + text::fixed(*spread * 100.0f, 1) + "% (" +
+                             verdict + ")");
     }
 }
 
@@ -175,10 +171,11 @@ void report_response(std::string& out, const dsp::ImpulseResponse& ir,
         throw CliError("the gate kept no samples - is it shorter than the arrival?");
     }
 
-    line(out, "#");
-    line(out, "# gated response: " + text::fixed(gate.length_seconds() * 1000.0f, 1) +
-                  " ms window, valid above " + text::fixed(response->resolution_hz, 0) + " Hz");
-    line(out, "# frequency_hz\tlevel_db\ttrustworthy");
+    append_line(out, "#");
+    append_line(out, "# gated response: " + text::fixed(gate.length_seconds() * 1000.0f, 1) +
+                         " ms window, valid above " + text::fixed(response->resolution_hz, 0) +
+                         " Hz");
+    append_line(out, "# frequency_hz\tlevel_db\ttrustworthy");
 
     // Log-spaced rows, because a linear listing of 2048 bins helps nobody.
     const float lowest = 20.0f;
@@ -190,8 +187,9 @@ void report_response(std::string& out, const dsp::ImpulseResponse& ir,
     for (std::size_t step = 0; step < steps; ++step) {
         const auto bin = saturating_cast<std::size_t>(std::round(hz / response->bin_spacing_hz));
         if (bin < response->magnitude_db.size()) {
-            line(out, text::fixed(hz, 1) + "\t" + text::fixed(response->magnitude_db[bin], 2) +
-                          "\t" + (response->is_trustworthy(hz) ? "yes" : "no"));
+            append_line(out, text::fixed(hz, 1) + "\t" +
+                                 text::fixed(response->magnitude_db[bin], 2) + "\t" +
+                                 (response->is_trustworthy(hz) ? "yes" : "no"));
         }
         hz *= ratio;
     }
@@ -212,17 +210,19 @@ std::string demo(const MeasureOptions& options) {
     const std::vector<float> response = room.respond(stimulus, room.rt60 * 3.0f);
 
     std::string out;
-    line(out, "# synthetic room measurement");
-    line(out, "#");
-    line(out, "# constructed:");
-    line(out, "#   direct arrival     " + text::fixed(room.direct_seconds * 1000.0f, 2) + " ms (" +
-                  text::fixed(room.direct_seconds * kSpeedOfSound, 2) + " m)");
+    append_line(out, "# synthetic room measurement");
+    append_line(out, "#");
+    append_line(out, "# constructed:");
+    append_line(out, "#   direct arrival     " + text::fixed(room.direct_seconds * 1000.0f, 2) +
+                         " ms (" + text::fixed(room.direct_seconds * dsp::kSpeedOfSound, 2) +
+                         " m)");
     for (const auto& reflection : room.reflections) {
-        line(out, "#   reflection         +" + text::fixed(reflection.offset_seconds * 1000.0f, 2) +
-                      " ms at " + text::fixed(reflection.gain * 100.0f, 0) + "%");
+        append_line(out, "#   reflection         +" +
+                             text::fixed(reflection.offset_seconds * 1000.0f, 2) + " ms at " +
+                             text::fixed(reflection.gain * 100.0f, 0) + "%");
     }
-    line(out, "#   reverberation      " + text::fixed(room.rt60, 3) + " s");
-    line(out, "#");
+    append_line(out, "#   reverberation      " + text::fixed(room.rt60, 3) + " s");
+    append_line(out, "#");
 
     out += analyse(stimulus, response, sample_rate, options);
     return out;
@@ -238,7 +238,7 @@ std::string analyse(std::span<const float> stimulus, std::span<const float> resp
     }
 
     std::string out;
-    line(out, "# measured:");
+    append_line(out, "# measured:");
     report_impulse(out, *ir);
     report_reverberation(out, *ir);
     report_response(out, *ir, options);
@@ -251,8 +251,8 @@ std::string from_files(const std::filesystem::path& stimulus_path,
     const audio::Source response = read_source(response_path);
 
     if (std::abs(stimulus.sample_rate - response.sample_rate) > 0.5) {
-        throw CliError("sample rate mismatch: stimulus is " + text::display(stimulus.sample_rate) +
-                       " Hz, response is " + text::display(response.sample_rate) + " Hz");
+        throw CliError("sample rate mismatch: stimulus is " + text::shortest(stimulus.sample_rate) +
+                       " Hz, response is " + text::shortest(response.sample_rate) + " Hz");
     }
 
     // Both files are reduced to their first channel. A stimulus is
@@ -268,11 +268,11 @@ std::string from_files(const std::filesystem::path& stimulus_path,
     };
 
     std::string out;
-    line(out, "# swept measurement");
-    line(out, "#   stimulus  " + stimulus_path.string());
-    line(out, "#   response  " + response_path.string());
-    line(out, "#   rate      " + text::display(stimulus.sample_rate) + " Hz");
-    line(out, "#");
+    append_line(out, "# swept measurement");
+    append_line(out, "#   stimulus  " + stimulus_path.string());
+    append_line(out, "#   response  " + response_path.string());
+    append_line(out, "#   rate      " + text::shortest(stimulus.sample_rate) + " Hz");
+    append_line(out, "#");
 
     out += analyse(take_first(stimulus), take_first(response),
                    static_cast<float>(stimulus.sample_rate), options);

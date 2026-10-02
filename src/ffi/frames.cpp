@@ -112,7 +112,7 @@ extern "C" bool analyzer_session_distortion(AnalyzerSession* session, float fund
         session->power.clear();
         session->power.reserve(frame.bins.size());
         for (const float db : frame.bins) {
-            session->power.push_back(std::pow(10.0f, db / 10.0f) / 2.0f);
+            session->power.push_back(analyzer::db_to_power(db) / 2.0f);
         }
         const float spacing = frame.bin_spacing_hz;
 
@@ -165,7 +165,7 @@ extern "C" uintptr_t analyzer_session_device_name(const AnalyzerSession* session
     return guard<std::uintptr_t>(0, [&] {
         const std::string& name = session->device_name;
         const std::size_t end =
-            analyzer::ffi::utf8_floor(name, std::min<std::size_t>(name.size(), capacity - 1));
+            analyzer::utf8_floor(name, std::min<std::size_t>(name.size(), capacity - 1));
         std::copy_n(name.begin(), end, out);
         out[end] = '\0';
         return end;

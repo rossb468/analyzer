@@ -27,7 +27,7 @@
 //
 // Number formatting is part of the format. REW and APO text is compared byte
 // for byte against what the Rust core wrote, so gains and frequencies print the
-// way Rust prints them (see numeric.hpp).
+// way Rust prints them (see base/number_text.hpp).
 
 #pragma once
 

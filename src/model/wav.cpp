@@ -48,10 +48,6 @@ std::string os_error() {
     return errno == 0 ? "unknown error" : std::error_code(errno, std::generic_category()).message();
 }
 
-std::string describe(const std::filesystem::path& path) {
-    return path.string();
-}
-
 void put_u16(std::vector<std::byte>& out, std::uint32_t value) {
     out.push_back(static_cast<std::byte>(value & 0xFF));
     out.push_back(static_cast<std::byte>((value >> 8) & 0xFF));
@@ -151,14 +147,14 @@ std::vector<char> read_file(const std::filesystem::path& path) {
     errno = 0;
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
-        throw IoError("opening " + describe(path) + ": " + os_error());
+        throw IoError("opening " + path.string() + ": " + os_error());
     }
     const std::streamoff size = file.tellg();
     file.seekg(0);
     std::vector<char> bytes(static_cast<std::size_t>(size));
     file.read(bytes.data(), size);
     if (!file) {
-        throw IoError("reading " + describe(path) + ": " + os_error());
+        throw IoError("reading " + path.string() + ": " + os_error());
     }
     return bytes;
 }
@@ -216,7 +212,7 @@ std::vector<float> render(dsp::Signal signal, float sample_rate, float seconds) 
         throw BadParameterError("that is more audio than a WAV file can hold");
     }
 
-    dsp::Generator generator(sample_rate, signal, kGeneratorSeed);
+    dsp::Generator generator(sample_rate, signal, dsp::kDefaultSeed);
     std::vector<float> out(static_cast<std::size_t>(frames), 0.0f);
     generator.fill(out);
     return out;
@@ -236,7 +232,7 @@ void write_wav(const std::filesystem::path& path, std::span<const float> samples
     errno = 0;
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
-        throw IoError("creating " + describe(path) + ": " + os_error());
+        throw IoError("creating " + path.string() + ": " + os_error());
     }
 
     const std::vector<std::byte> head =
@@ -254,7 +250,7 @@ void write_wav(const std::filesystem::path& path, std::span<const float> samples
 
     file.close();
     if (!file) {
-        throw IoError("finishing " + describe(path) + ": " + os_error());
+        throw IoError("finishing " + path.string() + ": " + os_error());
     }
 }
 
@@ -270,7 +266,7 @@ WavFile read_wav(const std::filesystem::path& path) {
 
     Reader reader;
     if (!drwav_init_memory(&reader.wav, bytes.data(), bytes.size(), nullptr)) {
-        throw IoError("opening " + describe(path) + ": not a readable WAV file");
+        throw IoError("opening " + path.string() + ": not a readable WAV file");
     }
     reader.open = true;
     const drwav& wav = reader.wav;
@@ -286,7 +282,7 @@ WavFile read_wav(const std::filesystem::path& path) {
             std::to_string(width) + " bits per sample");
     }
     if (wav.channels == 0) {
-        throw IoError(describe(path) + " declares zero channels");
+        throw IoError(path.string() + " declares zero channels");
     }
 
     WavFile file;
@@ -307,7 +303,7 @@ WavFile read_wav(const std::filesystem::path& path) {
             declared = (declared << 8) | static_cast<unsigned char>(bytes[start - 4 + i]);
         }
         if (declared > bytes.size() - start) {
-            throw IoError("reading " + describe(path) + ": unexpected end of file");
+            throw IoError("reading " + path.string() + ": unexpected end of file");
         }
     }
 
@@ -316,7 +312,7 @@ WavFile read_wav(const std::filesystem::path& path) {
     const std::uint64_t frames = wav.totalPCMFrameCount;
     const std::uint64_t frame_bytes = std::uint64_t{width / 8u} * wav.channels;
     if (frames > bytes.size() / frame_bytes) {
-        throw IoError("reading " + describe(path) + ": unexpected end of file");
+        throw IoError("reading " + path.string() + ": unexpected end of file");
     }
     const std::uint64_t count = frames * wav.channels;
     file.samples.resize(static_cast<std::size_t>(count));
@@ -343,7 +339,7 @@ WavFile read_wav(const std::filesystem::path& path) {
         }
     }
     if (got != frames) {
-        throw IoError("reading " + describe(path) + ": unexpected end of file");
+        throw IoError("reading " + path.string() + ": unexpected end of file");
     }
     return file;
 }

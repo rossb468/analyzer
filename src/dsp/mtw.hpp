@@ -13,7 +13,6 @@
 // this offers over REW's real-time side.
 //
 // Why the splices line up
-// -----------------------
 //
 // It is not obvious that independently windowed engines should agree on phase.
 // They do, and the reason is worth stating: the transfer function is a *ratio*.
@@ -25,7 +24,6 @@
 // Magnitude and coherence line up for the same reason.
 //
 // What does not line up
-// ---------------------
 //
 // Coherence still means something slightly different in each band, because it
 // is measured over a different window length. A band using a 256-point window

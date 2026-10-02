@@ -347,7 +347,7 @@ TEST(StartSession, ASweptMeasurementOfAPerfectWireFindsAnImpulseAtTheOrigin) {
     std::vector<float> wire(kFrames, 0.0f);
     dsp::Generator generator(48'000.0f,
                              dsp::Signal::sweep(100.0f, 10'000.0f, 0.5f, 1.0f, /*repeat=*/false),
-                             kGeneratorSeed);
+                             dsp::kDefaultSeed);
     generator.fill(wire);
 
     audio::OfflineBackend backend(audio::Source::mono(std::move(wire), kRate), 256);

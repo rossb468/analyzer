@@ -3,7 +3,6 @@
 // The one place that turns the compiler's idea of the platform into the two
 // macros the rest of the module tests, so that "is this iOS?" is answered the
 // same way in the platform selector, the backends' own headers and the tests.
-// This is the C++ counterpart of the Rust cfg(target_os = "...") attributes.
 //
 // Both are always defined, to 0 or 1, so a misspelt macro is a -Wundef warning
 // rather than a silent "off".

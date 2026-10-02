@@ -94,10 +94,10 @@ std::string Settings::to_text() const {
     return out;
 }
 
-Settings Settings::from_text(std::string_view text) {
+Settings Settings::from_text(std::string_view contents) {
     Settings settings;
 
-    for (const std::string_view raw : detail::lines(text)) {
+    for (const std::string_view raw : detail::lines(contents)) {
         const std::string_view line = detail::trim(raw);
         if (line.empty() || line == kSettingsMagic || line.starts_with('#')) {
             continue;

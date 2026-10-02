@@ -83,6 +83,9 @@ std::optional<float> parse_f32(std::string_view text);
 // fit.
 std::optional<std::uint32_t> parse_u32(std::string_view text) noexcept;
 
+// As parse_u32, for a size or count (`usize` in Rust).
+std::optional<std::size_t> parse_usize(std::string_view text) noexcept;
+
 // Parse as Rust's `bool::from_str`: exactly `true` or `false`.
 std::optional<bool> parse_bool(std::string_view text) noexcept;
 

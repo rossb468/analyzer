@@ -1,6 +1,6 @@
 // The command line, parsed.
 //
-// Hand-written rather than table-driven, as the Rust was: the flags interact
+// Hand-written rather than table-driven: the flags interact
 // (--bench and --live take an optional value, --sine and --generate share
 // --hz, --out means a report destination for one mode and the audio file for
 // another), and the error messages and the order in which problems are noticed
@@ -82,7 +82,7 @@ struct CompareInput {
 using Input = std::variant<WavInput, SineInput, LiveInput, ListDevicesInput, BenchInput,
                            MeasureDemoInput, MeasureInput, GenerateInput, CompareInput>;
 
-// Every setting, with the Rust harness's defaults.
+// Every setting, with its default.
 struct Args {
     Input input;
     std::size_t fft = 4096;

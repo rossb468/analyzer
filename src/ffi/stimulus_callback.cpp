@@ -15,7 +15,7 @@ StimulusCallback::StimulusCallback(engine::CaptureSink sink, std::shared_ptr<Sig
     : sink_(std::move(sink)),
       signal_(std::move(signal)),
       equaliser_(std::move(equaliser)),
-      generator_(sample_rate, signal_->signal(), kGeneratorSeed),
+      generator_(sample_rate, signal_->signal(), dsp::kDefaultSeed),
       channels_(channels),
       playing_(playing),
       internal_reference_(internal_reference),

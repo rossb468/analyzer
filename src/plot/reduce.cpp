@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <numbers>
 
 #include "base/numeric.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::plot {
 
@@ -51,7 +51,7 @@ float nearest(std::span<const float> values, float bin_spacing_hz, float hz, flo
 // `dense(span)` combines the bins that fall inside a column; `sparse(centre_hz)`
 // is used when none does. Both are template parameters, not std::function, so
 // they inline and the draw path never allocates.
-template <typename Dense, typename Sparse>
+template <class Dense, typename Sparse>
 void walk_columns(std::span<const float> values, float bin_spacing_hz, const FrequencyAxis& axis,
                   std::span<float> out, Dense dense, Sparse sparse) {
     const float column_width = axis.width() / static_cast<float>(out.size());
@@ -84,11 +84,10 @@ void walk_columns(std::span<const float> values, float bin_spacing_hz, const Fre
 namespace detail {
 
 float circular_mean_degrees(std::span<const float> degrees) noexcept {
-    constexpr float kRadiansPerDegree = std::numbers::pi_v<float> / 180.0f;
     float x = 0.0f;
     float y = 0.0f;
     for (const float angle : degrees) {
-        const float radians = angle * kRadiansPerDegree;
+        const float radians = angle * kRadiansPerDegree<float>;
         x += std::cos(radians);
         y += std::sin(radians);
     }
@@ -97,7 +96,7 @@ float circular_mean_degrees(std::span<const float> degrees) noexcept {
         // as good an answer as any, and does not produce a NaN.
         return 0.0f;
     }
-    return std::atan2(y, x) / kRadiansPerDegree;
+    return std::atan2(y, x) / kRadiansPerDegree<float>;
 }
 
 float mean_db(std::span<const float> levels) noexcept {
@@ -106,10 +105,10 @@ float mean_db(std::span<const float> levels) noexcept {
     }
     float sum = 0.0f;
     for (const float db : levels) {
-        sum += std::pow(10.0f, db / 10.0f);
+        sum += db_to_power(db);
     }
     const float mean = sum / static_cast<float>(levels.size());
-    return mean > 0.0f ? 10.0f * std::log10(mean) : kNegativeInfinity;
+    return mean > 0.0f ? power_to_db(mean) : kNegativeInfinity;
 }
 
 }  // namespace detail
@@ -134,7 +133,7 @@ void reduce(std::span<const float> bins, float bin_spacing_hz, const FrequencyAx
             case Reduction::Max: {
                 float loudest = kNegativeInfinity;
                 for (const float level : column) {
-                    // fmax, as the Rust f32::max: a NaN bin is ignored, not
+                    // fmax rather than std::max: a NaN bin is ignored, not
                     // allowed to wipe out the column.
                     loudest = std::fmax(loudest, level);
                 }

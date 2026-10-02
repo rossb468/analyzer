@@ -208,21 +208,34 @@ std::optional<float> parse_f32(std::string_view text) {
     return parse_real<float>(text);
 }
 
-std::optional<std::uint32_t> parse_u32(std::string_view text) noexcept {
+namespace {
+
+template <std::unsigned_integral Unsigned>
+std::optional<Unsigned> parse_unsigned(std::string_view text) noexcept {
     if (text.starts_with('+')) {
         text.remove_prefix(1);
     }
     // from_chars would also take a minus sign; there is no such thing as a
-    // negative u32, and "-0" is not one in Rust either.
+    // negative unsigned value, and "-0" is not one in Rust either.
     if (text.empty() || text.front() < '0' || text.front() > '9') {
         return std::nullopt;
     }
-    std::uint32_t value = 0;
+    Unsigned value = 0;
     const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
     if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
         return std::nullopt;
     }
     return value;
+}
+
+}  // namespace
+
+std::optional<std::uint32_t> parse_u32(std::string_view text) noexcept {
+    return parse_unsigned<std::uint32_t>(text);
+}
+
+std::optional<std::size_t> parse_usize(std::string_view text) noexcept {
+    return parse_unsigned<std::size_t>(text);
 }
 
 std::optional<bool> parse_bool(std::string_view text) noexcept {

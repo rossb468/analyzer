@@ -7,21 +7,20 @@
 #include <utility>
 
 #include "base/contract.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
 namespace {
 
-constexpr float kTau = 2.0f * std::numbers::pi_v<float>;
-
 // RMS of a full-scale sine, the reference for 0 dBFS.
 constexpr float kFullScaleRms = std::numbers::sqrt2_v<float> / 2.0f;
 
 // Pole frequencies from IEC 61672-1, in radians per second.
-constexpr float kW1 = 20.598'997f * kTau;
-constexpr float kW2 = 107.652'65f * kTau;
-constexpr float kW3 = 737.862'23f * kTau;
-constexpr float kW4 = 12'194.217f * kTau;
+constexpr float kW1 = 20.598'997f * kTau<float>;
+constexpr float kW2 = 107.652'65f * kTau<float>;
+constexpr float kW3 = 737.862'23f * kTau<float>;
+constexpr float kW4 = 12'194.217f * kTau<float>;
 
 // Attack and decay time constants in seconds.
 struct TimeConstants {
@@ -53,10 +52,7 @@ float coefficient(float seconds, float sample_rate) noexcept {
 
 // RMS to dBFS, referenced to a full-scale sine.
 float to_db(float rms) noexcept {
-    if (rms > 0.0f) {
-        return std::max(20.0f * std::log10(rms / kFullScaleRms), kMeterFloorDb);
-    }
-    return kMeterFloorDb;
+    return amplitude_to_db(rms / kFullScaleRms, kMeterFloorDb);
 }
 
 // Checked before anything is built from the rate, so a bad one aborts with the
@@ -167,7 +163,7 @@ float LevelMeter::peak_db() const noexcept {
     // A peak is an amplitude, and a full-scale sine peaks at 1.0 while
     // reading 0 dBFS, so no RMS correction applies.
     if (peak_ > 0.0f) {
-        return 20.0f * std::log10(peak_);
+        return amplitude_to_db(peak_);
     }
     return kMeterFloorDb;
 }

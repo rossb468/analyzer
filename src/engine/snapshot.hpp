@@ -11,7 +11,7 @@
 // can see a spectrum update that was never drawn.
 //
 // How it works
-// ------------
+//
 // The three buffers are owned by role, not by position. At any moment one is
 // the producer's "input", one is the consumer's "output", and the third is the
 // "back" buffer, whose index lives in a single atomic byte together with a

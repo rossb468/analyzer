@@ -101,8 +101,8 @@ TEST(CaptureRing, SurvivesWrappingTheBufferManyTimes) {
     EXPECT_EQ(sink.overruns(), 0u);
 }
 
-// A block that wraps must come out in order. The Rust version reached this
-// only implicitly; with a hand-written ring it deserves its own test.
+// A block that wraps must come out in order. With a hand-written ring this
+// deserves its own test.
 TEST(CaptureRing, BlockStraddlingTheEndComesOutInOrder) {
     auto [sink, source] = capture_ring(1, 5);
     std::array<float, 8> out{};

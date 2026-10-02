@@ -1,7 +1,7 @@
 // Stable C ABI surface consumed by the platform user interfaces.
 //
 // Shape of the boundary
-// ---------------------
+//
 // Two kinds of traffic cross here and they have opposite needs, so they use
 // different mechanisms:
 //
@@ -19,7 +19,7 @@
 // read.
 //
 // Rules for every entry point
-// ---------------------------
+//
 // - Null pointers are tolerated and become a failure return, never a crash.
 // - Exceptions are caught. Unwinding into C or Swift is undefined behaviour,
 //   and a UI thread should not die because analysis hit an edge case. Every
@@ -36,7 +36,6 @@
 #pragma once
 
 #include <cmath>
-#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -46,6 +45,9 @@
 #include <string_view>
 #include <utility>
 
+#include "base/os_error.hpp"
+#include "base/units.hpp"
+#include "base/utf8.hpp"
 #include "ffi/c_api.hpp"
 
 namespace analyzer::ffi {
@@ -59,14 +61,6 @@ inline constexpr std::size_t kMaxEqBands = ANALYZER_MAX_EQ_BANDS;
 // than this has the excess dropped, which costs a visible overrun; growing a
 // buffer on the audio thread would instead cost an audible one.
 inline constexpr std::size_t kMaxCallbackFrames = 16'384;
-
-// Fixed so a run is reproducible. Noise that differs between runs makes two
-// measurements of the same room impossible to compare.
-inline constexpr std::uint64_t kGeneratorSeed = 0x5EED'5EED'5EED'5EEDull;
-
-// Speed of sound used to turn a delay into a distance. 343 m/s, the
-// conventional figure at 20 C.
-inline constexpr float kSpeedOfSound = 343.0f;
 
 // ---------------------------------------------------------------------------
 // The guard
@@ -117,9 +111,9 @@ void set_status(AnalyzerStatus* out, const AnalyzerStatus& status) noexcept;
 
 // Run `body` like `guard`, and also report a thrown exception through `status`.
 //
-// The Rust caught panics and left the status untouched, which a caller that
-// had not initialised it would read as garbage. An exception that escapes the
-// body here is reported with its message instead.
+// A bare guard() leaves the status untouched when the body throws, which a
+// caller that had not initialised it would read as garbage. An exception that
+// escapes the body here is reported with its message instead.
 template <class R, class F>
 R guard_status(AnalyzerStatus* status, R fallback, F&& body) noexcept {
     try {
@@ -136,15 +130,6 @@ R guard_status(AnalyzerStatus* status, R fallback, F&& body) noexcept {
 // Text
 // ---------------------------------------------------------------------------
 
-// Largest index at or below `end` that does not fall inside a UTF-8 sequence.
-std::size_t utf8_floor(std::string_view text, std::size_t end) noexcept;
-
-// Whether `text` is well-formed UTF-8.
-bool is_valid_utf8(std::string_view text) noexcept;
-
-// `text` with each invalid sequence replaced by U+FFFD.
-std::string utf8_lossy(std::string_view text);
-
 // Copy a string into a fixed NUL-terminated buffer, truncating on a character
 // boundary so the result stays valid UTF-8. The whole buffer is cleared first.
 void write_c_string(std::span<char> dest, std::string_view text) noexcept;
@@ -160,10 +145,6 @@ std::optional<std::string> checked_utf8(const char* text);
 // ---------------------------------------------------------------------------
 // Files
 // ---------------------------------------------------------------------------
-
-// An operating system error as Rust's io::Error printed it, for messages that
-// have always read "writing /x/y: No such file or directory (os error 2)".
-std::string os_error_text(int error);
 
 // Write `bytes` to `path`, creating or truncating it. Returns the error text on
 // failure.
@@ -191,13 +172,7 @@ FileRead read_text_file(const std::string& path);
 // A level above 0 dBFS cannot be produced and would only clip, so the ceiling
 // is enforced here rather than trusted to the caller.
 inline float amplitude_from_db(float level_db) noexcept {
-    return std::pow(10.0f, std::fmin(level_db, 0.0f) / 20.0f);
-}
-
-// IEEE total order, which is what a comparison of absolute values wants when a
-// NaN may be among them.
-inline bool total_less(float a, float b) noexcept {
-    return std::strong_order(a, b) < 0;
+    return db_to_amplitude(std::fmin(level_db, 0.0f));
 }
 
 // `value` limited to [low, high], passing NaN through. Throws when the bounds

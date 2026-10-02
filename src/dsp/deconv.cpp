@@ -28,8 +28,9 @@ std::optional<float> locate_peak(std::span<const float> samples) noexcept {
         return std::nullopt;
     }
 
-    // `>=` so the last of several equal maxima wins, as Rust's max_by does.
-    // It matters for a recording of silence, whose response is all zeros.
+    // `>=` so the last of several equal maxima wins; std::max_element would
+    // pick the first. It matters for a recording of silence, whose response is
+    // all zeros.
     std::size_t index = 0;
     float peak = std::abs(samples[0]);
     for (std::size_t i = 1; i < samples.size(); ++i) {
@@ -118,9 +119,8 @@ std::optional<ImpulseResponse> Deconvolver::deconvolve(std::span<const float> st
             denominator > 0.0f ? response_spectrum_[k] * std::conj(x) / denominator : Complex32{};
     }
 
-    // No clean-up of the DC and Nyquist bins is needed before this: realfft's
-    // inverse rejected a residual imaginary part there, so the Rust zeroed it
-    // first, but Fft::inverse ignores it.
+    // The quotient's DC and Nyquist bins may carry a residual imaginary part;
+    // Fft::inverse ignores it, so there is nothing to clean up first.
     fft_.inverse(quotient_, result_);
 
     // The inverse transform is unnormalised.

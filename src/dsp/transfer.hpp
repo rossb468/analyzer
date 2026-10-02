@@ -8,7 +8,6 @@
 // show, and get the same answer either way.
 //
 // The estimator
-// -------------
 //
 // With X the reference spectrum and Y the measurement:
 //
@@ -25,7 +24,6 @@
 // coherence is defined in terms of those averaged products.
 //
 // Coherence needs more than one frame
-// -----------------------------------
 //
 // With a single frame |Gxy|^2 = Gxx*Gyy identically, so coherence is exactly 1
 // no matter how noisy the measurement. It only becomes informative once several

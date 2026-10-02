@@ -7,7 +7,6 @@
 // taper threw away and yields more averages per second.
 //
 // Level conventions
-// -----------------
 //
 // SpectrumAnalyzer::power() is mean-square power per bin, scaled so that
 // summing every bin of an unwindowed frame gives the mean square of the input
@@ -34,7 +33,7 @@ namespace analyzer::dsp {
 
 // Floor applied by SpectrumAnalyzer::write_db_fs() so that empty bins produce a
 // finite number instead of negative infinity.
-inline constexpr float kDbFloor = -200.0f;
+inline constexpr float kSpectrumFloorDb = -200.0f;
 
 // Fraction of each frame reused by the next one.
 //

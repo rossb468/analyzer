@@ -5,11 +5,10 @@
 // failure throws rather than returning a status. See "Errors" in
 // docs/CPP-CONVENTIONS.md. The C ABI catches ModelError at the boundary.
 //
-// One class per case a caller might want to handle differently, which is the
-// Rust error enums' variants. Each message carries the same information the
-// Rust Display did; the structured pieces (the field that did not parse, the
-// byte counts of a truncated block) are also available through accessors so a
-// caller need not take a message apart.
+// One class per case a caller might want to handle differently. Each message
+// says what went wrong in full; the structured pieces (the field that did not
+// parse, the byte counts of a truncated block) are also available through
+// accessors so a caller need not take a message apart.
 
 #pragma once
 

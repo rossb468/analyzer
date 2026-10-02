@@ -4,7 +4,7 @@
 // audio callback is the producer; the analysis thread is the consumer.
 //
 // Why interleaved, and why all-or-nothing
-// ---------------------------------------
+//
 // One ring carries interleaved frames rather than one ring per channel. That is
 // a correctness decision, not a convenience: with separate rings a partial
 // write could advance one channel and not another, and channels that drift
@@ -16,7 +16,7 @@
 // desynchronise every channel after it.
 //
 // Overruns are not silent
-// -----------------------
+//
 // The producer cannot block - it is on a hard deadline - and it cannot
 // allocate. Dropping is the only option left. But a measurement taken across
 // dropped audio is wrong rather than merely degraded, so the count is published
@@ -24,7 +24,7 @@
 // mode a measurement tool has.
 //
 // How it works
-// ------------
+//
 // Two monotonically increasing counters, `written` and `read`, both in samples.
 // The producer owns `written` and only reads `read`; the consumer owns `read`
 // and only reads `written`. Each publishes its counter with a release store

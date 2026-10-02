@@ -81,16 +81,16 @@ std::optional<DelayEstimate> DelayFinder::find(std::span<const float> reference,
             break;
     }
 
-    // No clean-up of the DC and Nyquist bins is needed before this: realfft's
-    // inverse rejected a residual imaginary part there, so the Rust zeroed it
-    // first, but Fft::inverse ignores it.
+    // The cross-spectrum's DC and Nyquist bins may carry a residual imaginary
+    // part; Fft::inverse ignores it, so there is nothing to clean up first.
     fft_.inverse(cross_, correlation_);
 
     return locate_peak();
 }
 
 DelayEstimate DelayFinder::locate_peak() const noexcept {
-    // `>=` so the last of several equal maxima wins, as Rust's max_by does.
+    // `>=` so the last of several equal maxima wins; std::max_element would
+    // pick the first.
     std::size_t index = 0;
     float peak = correlation_[0];
     for (std::size_t i = 1; i < correlation_.size(); ++i) {

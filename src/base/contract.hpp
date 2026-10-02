@@ -4,9 +4,8 @@
 // length, an FFT size of zero. There is no sensible way to carry on, and
 // absorbing it into an error return would put a branch on every call of the
 // real-time path for a condition that should never happen. So it aborts, with
-// a message, in release as well as debug - the same behaviour the Rust core
-// had with assert!, and the reason the check is a macro of our own rather
-// than <cassert>, which NDEBUG compiles away.
+// a message, in release as well as debug. That is why the check is a macro of
+// our own rather than <cassert>, which NDEBUG compiles away.
 //
 // Runtime conditions that can legitimately happen - a file that does not
 // parse, a device that has gone - are not contract violations. Those throw

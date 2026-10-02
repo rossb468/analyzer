@@ -67,7 +67,7 @@ struct Response {
     // Rows that are not two numbers are skipped rather than fatal. An export
     // with a stray legend in the middle should still compare. That is why this
     // does not throw: there is no input it rejects.
-    static Response parse(std::string_view text);
+    static Response parse(std::string_view contents);
 
     // Level at `hz`, interpolated in decibels against log frequency.
     //
