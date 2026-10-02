@@ -5,29 +5,15 @@
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
-#include <limits>
 #include <numbers>
 
+#include "base/numeric.hpp"
 #include "dsp/complex.hpp"
 #include "dsp/fft.hpp"
 
 namespace analyzer::dsp {
 
 namespace {
-
-// Float to a count, saturating at 0 below and `limit` above, with NaN as 0.
-//
-// What Rust's `as usize` does, which a C++ cast does not: out of range is
-// undefined behaviour there, and gates and fades come straight from a caller.
-std::size_t saturating_count(float value, std::size_t limit) noexcept {
-    if (!(value > 0.0f)) {
-        return 0;
-    }
-    if (value >= static_cast<float>(limit)) {
-        return limit;
-    }
-    return static_cast<std::size_t>(value);
-}
 
 // Where the response drops into its own noise floor.
 //
@@ -174,8 +160,9 @@ std::vector<float> apply_gate(const ImpulseResponse& ir, const Gate& gate) {
     }
 
     const auto to_index = [&](float seconds) {
-        return saturating_count(std::round(ir.peak_samples + seconds * ir.sample_rate),
-                                ir.samples.size());
+        return std::min(
+            saturating_cast<std::size_t>(std::round(ir.peak_samples + seconds * ir.sample_rate)),
+            ir.samples.size());
     };
     const std::size_t start = to_index(gate.start_seconds);
     const std::size_t end = to_index(gate.end_seconds);
@@ -185,7 +172,8 @@ std::vector<float> apply_gate(const ImpulseResponse& ir, const Gate& gate) {
 
     const auto kept = std::span<const float>(ir.samples).subspan(start, end - start);
     std::vector<float> out(kept.begin(), kept.end());
-    const std::size_t fade = saturating_count(gate.fade_seconds * ir.sample_rate, out.size());
+    const std::size_t fade =
+        std::min(saturating_cast<std::size_t>(gate.fade_seconds * ir.sample_rate), out.size());
 
     // Taper only the closing edge. The opening edge sits in silence before the
     // arrival, so there is nothing there to discontinuity against.
@@ -234,7 +222,8 @@ std::optional<GatedResponse> gated_response(const ImpulseResponse& ir, const Gat
 }
 
 std::vector<float> schroeder_decay(const ImpulseResponse& ir) {
-    const std::size_t start = saturating_count(ir.peak_samples, ir.samples.size());
+    const std::size_t start =
+        std::min(saturating_cast<std::size_t>(ir.peak_samples), ir.samples.size());
     const auto full_tail = std::span<const float>(ir.samples).subspan(start);
     if (full_tail.empty()) {
         return {};
@@ -315,8 +304,7 @@ WindowKind recommended_gate_window() {
 }
 
 std::optional<Window> gate_window(const Gate& gate, float sample_rate) {
-    const std::size_t length = saturating_count(gate.length_seconds() * sample_rate,
-                                                std::numeric_limits<std::size_t>::max());
+    const std::size_t length = saturating_cast<std::size_t>(gate.length_seconds() * sample_rate);
     if (length == 0) {
         return std::nullopt;
     }

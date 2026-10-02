@@ -11,9 +11,9 @@
 
 #include <gtest/gtest.h>
 
-#include "dsp/complex.hpp"
-#include "dsp/fft.hpp"
 #include "dsp/window.hpp"
+#include "support/signals.hpp"
+#include "support/spectra.hpp"
 
 namespace analyzer::dsp {
 namespace {
@@ -23,48 +23,9 @@ constexpr std::size_t kSize = 4096;
 // Bin 85 exactly at 48 kHz / 4096.
 constexpr float kOnBinHz = 996.09375f;
 
-// Stand-in for the Rust SpectrumAnalyzer, which is ported separately: a Welch
-// average of 50%-overlapped, windowed frames, in the analyzer's own power
-// convention (mean-square per bin, a bin-centred sine of amplitude A reads
-// A^2 / 2). Averaging is the incremental mean the analyzer uses for
-// Averaging::Infinite.
-std::vector<float> average_power(std::span<const float> samples, std::size_t size,
-                                 WindowKind kind) {
-    const Window window(kind, size);
-    RealFft fft(size);
-    const float scale = 1.0f / (static_cast<float>(size) * window.coherent_gain());
-    const std::size_t hop = size / 2;
-
-    std::vector<float> windowed(size);
-    std::vector<Complex32> spectrum(fft.bins());
-    std::vector<float> power(fft.bins(), 0.0f);
-    const std::size_t last = fft.bins() - 1;
-
-    std::size_t frames = 0;
-    for (std::size_t start = 0; start + size <= samples.size(); start += hop) {
-        window.apply_to(samples.subspan(start, size), windowed);
-        fft.forward(windowed, spectrum);
-        ++frames;
-        const auto n = static_cast<float>(frames);
-        for (std::size_t k = 0; k < power.size(); ++k) {
-            // DC and Nyquist are real and unpaired; every bin between them
-            // stands for a conjugate pair.
-            const float magnitude = std::abs(spectrum[k]) * scale;
-            const float frame_power =
-                (k == 0 || k == last) ? magnitude * magnitude : 2.0f * magnitude * magnitude;
-            power[k] += (frame_power - power[k]) / n;
-        }
-    }
-    return power;
-}
-
 // 0 dBFS is a full-scale sine, which has mean square 0.5.
 std::vector<float> analyse(std::span<const float> samples, std::size_t size, WindowKind window) {
-    std::vector<float> db = average_power(samples, size, window);
-    for (float& value : db) {
-        value = value > 0.0f ? std::max(10.0f * std::log10(2.0f * value), -200.0f) : -200.0f;
-    }
-    return db;
+    return test::average_db_fs(samples, kRate, size, window);
 }
 
 std::vector<float> analyse(std::span<const float> samples, WindowKind window) {
@@ -76,10 +37,6 @@ std::vector<float> generate(Signal signal, std::size_t samples) {
     std::vector<float> out(samples, 0.0f);
     generator.fill(out);
     return out;
-}
-
-std::size_t peak_bin(std::span<const float> db) {
-    return static_cast<std::size_t>(std::max_element(db.begin(), db.end()) - db.begin());
 }
 
 float peak_abs(std::span<const float> samples) {
@@ -108,7 +65,7 @@ TEST(Generator, AGeneratedSineMeasuresAtItsOwnFrequencyAndLevel) {
     const auto samples = generate(Signal::sine(kOnBinHz, 0.5f), kSize * 8);
     const auto db = analyse(samples, WindowKind::flat_top());
 
-    EXPECT_EQ(peak_bin(db), 85u);
+    EXPECT_EQ(test::peak_bin(db), 85u);
     EXPECT_LT(std::abs(db[85] - -6.0206f), 0.05f) << "expected -6.02 dBFS, got " << db[85];
 }
 
@@ -123,7 +80,7 @@ TEST(Generator, ALongSineDoesNotDriftOffFrequency) {
     std::vector<float> tail(kSize * 4);
     generator.fill(tail);
     const auto db = analyse(tail, WindowKind::flat_top());
-    EXPECT_EQ(peak_bin(db), 85u) << "tone drifted after ten seconds";
+    EXPECT_EQ(test::peak_bin(db), 85u) << "tone drifted after ten seconds";
 }
 
 TEST(Generator, SilenceIsSilent) {
@@ -218,8 +175,8 @@ TEST(Generator, ASweepStartsLowAndEndsHigh) {
 
     const auto peak_hz = [](std::span<const float> chunk) {
         constexpr std::size_t size = 2048;
-        const auto power = average_power(chunk, size, WindowKind::hann());
-        return static_cast<float>(peak_bin(power)) * (kRate / static_cast<float>(size));
+        const auto power = test::average_power(chunk, kRate, size, WindowKind::hann());
+        return static_cast<float>(test::peak_bin(power)) * (kRate / static_cast<float>(size));
     };
 
     const float start = peak_hz(std::span<const float>(all).first(8192));

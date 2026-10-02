@@ -4,23 +4,9 @@
 #include <cmath>
 
 #include "base/contract.hpp"
+#include "base/numeric.hpp"
 
 namespace analyzer::dsp {
-
-namespace {
-
-// Rust's `as usize` saturates and maps NaN and negatives to zero; a plain cast
-// is undefined behaviour for all three. A bin index here is a band edge divided
-// by a caller-supplied bin spacing, so it can be anything.
-std::size_t to_index(float value) noexcept {
-    if (!(value > 0.0f)) {
-        return 0;
-    }
-    constexpr float kLimit = 9.0e18f;
-    return value >= kLimit ? static_cast<std::size_t>(kLimit) : static_cast<std::size_t>(value);
-}
-
-}  // namespace
 
 float Band::nominal_hz() const noexcept {
     // The preferred series within one decade.
@@ -97,10 +83,10 @@ void OctaveBands::apply(std::span<const float> bins_db, float bin_spacing_hz,
         const Band& band = bands_[i];
         // Skip bin 0: DC belongs to no band. fmax rather than std::max: it
         // ignores a NaN argument, as Rust's f32::max did.
-        const std::size_t first =
-            to_index(std::fmax(std::ceil(band.lower_hz / bin_spacing_hz), 1.0f));
-        const std::size_t last =
-            std::min(to_index(std::floor(band.upper_hz / bin_spacing_hz)), last_bin);
+        const std::size_t first = saturating_cast<std::size_t>(
+            std::fmax(std::ceil(band.lower_hz / bin_spacing_hz), 1.0f));
+        const std::size_t last = std::min(
+            saturating_cast<std::size_t>(std::floor(band.upper_hz / bin_spacing_hz)), last_bin);
 
         if (first <= last) {
             float power = 0.0f;
@@ -112,7 +98,8 @@ void OctaveBands::apply(std::span<const float> bins_db, float bin_spacing_hz,
             // Narrower than the resolution: report the nearest bin rather than
             // nothing, and let is_resolvable flag it as approximate.
             const std::size_t nearest = std::clamp(
-                to_index(std::round(band.centre_hz / bin_spacing_hz)), std::size_t{1}, last_bin);
+                saturating_cast<std::size_t>(std::round(band.centre_hz / bin_spacing_hz)),
+                std::size_t{1}, last_bin);
             out[i] = bins_db[nearest];
         }
     }

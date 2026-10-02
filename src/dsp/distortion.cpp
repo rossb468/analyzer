@@ -7,20 +7,11 @@
 #include <cstdio>
 #include <utility>
 
+#include "base/numeric.hpp"
+
 namespace analyzer::dsp {
 
 namespace {
-
-// Rust's `as usize` saturates and maps NaN and negatives to zero; a plain cast
-// is undefined behaviour for all three. These indices come from a caller's
-// frequency divided by a bin spacing, so they can be anything.
-std::size_t to_index(float value) noexcept {
-    if (!(value > 0.0f)) {
-        return 0;
-    }
-    constexpr float kLimit = 9.0e18f;
-    return value >= kLimit ? static_cast<std::size_t>(kLimit) : static_cast<std::size_t>(value);
-}
 
 std::size_t abs_diff(std::size_t a, std::size_t b) noexcept {
     return a > b ? a - b : b - a;
@@ -45,7 +36,12 @@ std::size_t last_max_index(std::span<const float> power_bins, std::size_t first,
 std::optional<std::size_t> peak_near(std::span<const float> power_bins, std::size_t centre,
                                      std::size_t window) noexcept {
     const std::size_t low = std::max<std::size_t>(centre > window ? centre - window : 0, 1);
-    const std::size_t high = std::min(centre + window, power_bins.size() - 1);
+    // `centre` can be the largest size_t when the caller's frequency divided by
+    // its bin spacing saturated, so `centre + window` is compared by
+    // subtraction rather than risking a wrap to a small number. (Rust would
+    // have panicked on that overflow in a debug build.)
+    const std::size_t last = power_bins.size() - 1;
+    const std::size_t high = (centre >= last || window >= last - centre) ? last : centre + window;
     if (low > high) {
         return std::nullopt;
     }
@@ -148,7 +144,8 @@ std::optional<Distortion> analyse_distortion(std::span<const float> power_bins,
     // Locate the fundamental. Bin 0 is DC and is never a tone.
     std::size_t fundamental_bin = 0;
     if (fundamental_hz) {
-        const std::size_t nominal = to_index(std::round(*fundamental_hz / bin_spacing_hz));
+        const std::size_t nominal =
+            saturating_cast<std::size_t>(std::round(*fundamental_hz / bin_spacing_hz));
         const auto peak = peak_near(power_bins, nominal, config.search_bins);
         if (!peak) {
             return std::nullopt;
@@ -185,7 +182,8 @@ std::optional<Distortion> analyse_distortion(std::span<const float> power_bins,
             ++above_nyquist;
             continue;
         }
-        const std::size_t nominal = to_index(std::round(expected / bin_spacing_hz));
+        const std::size_t nominal =
+            saturating_cast<std::size_t>(std::round(expected / bin_spacing_hz));
         const auto peak = peak_near(power_bins, nominal, config.search_bins);
         if (!peak) {
             continue;

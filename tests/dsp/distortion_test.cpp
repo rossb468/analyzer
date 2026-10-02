@@ -15,10 +15,10 @@
 
 #include <gtest/gtest.h>
 
-#include "dsp/complex.hpp"
-#include "dsp/fft.hpp"
 #include "dsp/window.hpp"
+#include "support/generated_signals.hpp"
 #include "support/signals.hpp"
+#include "support/spectra.hpp"
 
 namespace analyzer::dsp {
 namespace {
@@ -29,41 +29,6 @@ constexpr float kRate = 48'000.0f;
 constexpr std::size_t kSize = 8192;
 
 using Harmonics = std::initializer_list<std::pair<std::uint32_t, float>>;
-
-// Stand-in for the Rust SpectrumAnalyzer, which is ported separately: a Welch
-// average of 50%-overlapped, windowed frames, in the analyzer's own power
-// convention (mean-square per bin, a bin-centred sine of amplitude A reads
-// A^2 / 2). Averaging is the incremental mean the analyzer uses for
-// Averaging::Infinite.
-std::vector<float> average_power(std::span<const float> samples, std::size_t size,
-                                 WindowKind kind) {
-    const Window window(kind, size);
-    RealFft fft(size);
-    const float scale = 1.0f / (static_cast<float>(size) * window.coherent_gain());
-    const std::size_t hop = size / 2;
-
-    std::vector<float> windowed(size);
-    std::vector<Complex32> spectrum(fft.bins());
-    std::vector<float> power(fft.bins(), 0.0f);
-    const std::size_t last = fft.bins() - 1;
-
-    std::size_t frames = 0;
-    for (std::size_t start = 0; start + size <= samples.size(); start += hop) {
-        window.apply_to(samples.subspan(start, size), windowed);
-        fft.forward(windowed, spectrum);
-        ++frames;
-        const auto n = static_cast<float>(frames);
-        for (std::size_t k = 0; k < power.size(); ++k) {
-            // DC and Nyquist are real and unpaired; every bin between them
-            // stands for a conjugate pair.
-            const float magnitude = std::abs(spectrum[k]) * scale;
-            const float frame_power =
-                (k == 0 || k == last) ? magnitude * magnitude : 2.0f * magnitude * magnitude;
-            power[k] += (frame_power - power[k]) / n;
-        }
-    }
-    return power;
-}
 
 struct Spectrum {
     std::vector<float> power;
@@ -76,7 +41,10 @@ struct Spectrum {
 Spectrum spectrum_of(float fundamental_hz, Harmonics harmonics, float noise) {
     const std::size_t count = kSize * 8;
     std::vector<float> samples(count, 0.0f);
-    std::uint64_t rng = 0x1234'5678;
+    // The generator's own noise, from the seed the Rust test's inline xorshift
+    // started at, so the stream is the same.
+    const std::vector<float> white =
+        noise > 0.0f ? test::white_noise(count, 1.0f, 0x1234'5678) : std::vector<float>{};
 
     for (std::size_t index = 0; index < count; ++index) {
         const float t = static_cast<float>(index) / kRate;
@@ -86,19 +54,14 @@ Spectrum spectrum_of(float fundamental_hz, Harmonics harmonics, float noise) {
                 0.5f * amplitude * std::sin(kTau * fundamental_hz * static_cast<float>(order) * t);
         }
         if (noise > 0.0f) {
-            rng ^= rng >> 12;
-            rng ^= rng << 25;
-            rng ^= rng >> 27;
-            const float r =
-                static_cast<float>((rng * 0x2545'F491'4F6C'DD1D) >> 40) / 8'388'608.0f - 1.0f;
-            value += r * noise;
+            value += white[index] * noise;
         }
         samples[index] = value;
     }
 
     // Blackman-Harris: harmonics can sit 100 dB down, and Hann's sidelobes would
     // bury them in the fundamental's own leakage.
-    return {average_power(samples, kSize, WindowKind::blackman_harris()),
+    return {test::average_power(samples, kRate, kSize, WindowKind::blackman_harris()),
             kRate / static_cast<float>(kSize)};
 }
 
@@ -328,6 +291,15 @@ TEST(Distortion, EveryReportedNumberIsFinite) {
         EXPECT_TRUE(std::isfinite(h.level_db) && std::isfinite(h.relative_db) &&
                     std::isfinite(h.percent));
     }
+}
+
+// Not in the Rust suite. A bin spacing this small sends the supplied
+// fundamental's bin index to the largest size_t (Rust's `as` saturates there),
+// and the search window around it must not wrap past zero and find a "peak"
+// somewhere unrelated. Nothing is in range, so nothing is found.
+TEST(Distortion, AFundamentalBeyondTheSpectrumFindsNothing) {
+    const Spectrum s = spectrum_of(1000.0f, {}, 0.0f);
+    EXPECT_FALSE(analyse_distortion(s.power, 1e-30f, 1000.0f, {}));
 }
 
 }  // namespace

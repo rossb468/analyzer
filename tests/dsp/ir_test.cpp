@@ -15,28 +15,12 @@
 
 #include "dsp/deconv.hpp"
 #include "dsp/window.hpp"
+#include "support/generated_signals.hpp"
 
 namespace analyzer::dsp {
 namespace {
 
 constexpr float kRate = 48000.0f;
-
-// The Rust tests build their noise with dsp::Generator, which is ported
-// separately. This is the same xorshift white noise, so a seed gives the same
-// signal; swap it for Generator once it exists.
-std::vector<float> white_noise(std::size_t samples, float amplitude, std::uint64_t seed) {
-    std::uint64_t state = seed == 0 ? 0x9E3779B97F4A7C15ull : seed;
-    std::vector<float> out(samples);
-    for (float& sample : out) {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        const std::uint64_t scrambled = state * 0x2545F4914F6CDD1Dull;
-        // Top 24 bits, mapped to [-1, 1); the low bits of xorshift are weak.
-        sample = (static_cast<float>(scrambled >> 40) / 8388608.0f - 1.0f) * amplitude;
-    }
-    return out;
-}
 
 // A synthetic decay with a known reverberation time.
 //
@@ -46,7 +30,7 @@ ImpulseResponse decaying_noise(float rt60, float seconds, std::uint64_t seed) {
     const float tau = rt60 / 6.908f;
     const auto count = static_cast<std::size_t>(kRate * seconds);
 
-    auto samples = white_noise(count, 1.0f, seed);
+    auto samples = test::white_noise(count, 1.0f, seed);
     for (std::size_t index = 0; index < samples.size(); ++index) {
         const float t = static_cast<float>(index) / kRate;
         samples[index] *= std::exp(-t / tau);

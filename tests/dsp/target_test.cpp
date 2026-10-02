@@ -11,17 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include "support/signals.hpp"
+
 namespace analyzer::dsp {
 namespace {
-
-std::vector<float> log_sweep(float from, float to, std::size_t count) {
-    std::vector<float> out;
-    for (std::size_t i = 0; i < count; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
-        out.push_back(from * std::pow(to / from, t));
-    }
-    return out;
-}
 
 TEST(TargetCurve, FlatIsFlatEverywhere) {
     const TargetCurve target(TargetShape::flat());
@@ -90,7 +83,7 @@ TEST(TargetShape, AnEmptyOrSinglePointCustomCurveIsUsable) {
 // Alignment is what makes a relative target drawable against an absolute
 // measurement.
 TEST(TargetCurve, AlignmentCentresTheTargetOnTheMeasurement) {
-    const auto frequencies = log_sweep(20.0f, 20'000.0f, 512);
+    const auto frequencies = test::log_spaced(20.0f, 20'000.0f, 512);
     const std::vector<float> measured(frequencies.size(), -35.0f);
 
     const auto target = TargetCurve(TargetShape::flat())
@@ -102,7 +95,7 @@ TEST(TargetCurve, AlignmentCentresTheTargetOnTheMeasurement) {
 // Only the alignment band counts, so a deep null outside it must not drag the
 // whole curve down.
 TEST(TargetCurve, AlignmentIgnoresEverythingOutsideTheBand) {
-    const auto frequencies = log_sweep(20.0f, 20'000.0f, 512);
+    const auto frequencies = test::log_spaced(20.0f, 20'000.0f, 512);
     std::vector<float> measured;
     for (const float hz : frequencies) {
         measured.push_back(hz < 100.0f ? -90.0f : -30.0f);

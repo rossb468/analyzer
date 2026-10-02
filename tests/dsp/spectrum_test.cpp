@@ -36,10 +36,6 @@ SpectrumAnalyzer analyzer(WindowKind window, Averaging averaging) {
     });
 }
 
-std::size_t peak_bin(std::span<const float> power) {
-    return static_cast<std::size_t>(std::max_element(power.begin(), power.end()) - power.begin());
-}
-
 TEST(Overlap, HopFollowsOverlap) {
     EXPECT_EQ(overlap_hop(Overlap::None, 4096), 4096u);
     EXPECT_EQ(overlap_hop(Overlap::Half, 4096), 2048u);
@@ -56,7 +52,7 @@ TEST(SpectrumAnalyzer, FullScaleSineReadsZeroDbFs) {
     std::vector<float> db(a.bins());
     a.write_db_fs(db);
 
-    const std::size_t peak = peak_bin(a.power());
+    const std::size_t peak = test::peak_bin(a.power());
     EXPECT_EQ(peak, 64u);
     EXPECT_LT(std::abs(db[peak]), 0.01f) << "expected 0 dBFS, got " << db[peak];
 }
@@ -68,7 +64,7 @@ TEST(SpectrumAnalyzer, HalfAmplitudeSineReadsMinusSixDb) {
     std::vector<float> db(a.bins());
     a.write_db_fs(db);
 
-    const float level = db[peak_bin(a.power())];
+    const float level = db[test::peak_bin(a.power())];
     EXPECT_LT(std::abs(level + 6.0206f), 0.01f) << "expected -6.02 dBFS, got " << level;
 }
 

@@ -5,6 +5,7 @@
 #include <numbers>
 
 #include "base/contract.hpp"
+#include "base/numeric.hpp"
 
 namespace analyzer::dsp {
 
@@ -14,12 +15,6 @@ constexpr double kTau = 2.0 * std::numbers::pi;
 
 // Zero is a fixed point of xorshift, so it must never be the state.
 constexpr std::uint64_t kZeroSeedReplacement = 0x9E37'79B9'7F4A'7C15;
-
-// Converting a double beyond the range of uint64_t is undefined behaviour in
-// C++, where Rust saturated. A sweep length is a duration times a rate, so a
-// hostile or absurd `seconds` can reach it; cap well below 2^63 instead. No
-// real sweep is within a factor of a billion of this.
-constexpr double kMaxSweepFrames = 9.0e18;
 
 }  // namespace
 
@@ -130,8 +125,10 @@ void Generator::fill_sweep(std::span<float> out) noexcept {
     const double start = std::fmax(static_cast<double>(signal_.start_hz), 1e-3);
     const double end = std::fmax(static_cast<double>(signal_.end_hz), start + 1e-3);
     const double duration = std::fmax(static_cast<double>(signal_.seconds), 1e-3);
-    const auto total =
-        static_cast<std::uint64_t>(std::min(duration * sample_rate_, kMaxSweepFrames));
+    // A sweep length is a duration times a rate, so a hostile or absurd
+    // `seconds` can overflow the frame count; saturating_cast pins it at the
+    // largest count instead of invoking undefined behaviour.
+    const auto total = saturating_cast<std::uint64_t>(duration * sample_rate_);
     const double ratio = std::log(end / start);
 
     for (float& slot : out) {

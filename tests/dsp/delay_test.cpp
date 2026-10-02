@@ -13,43 +13,17 @@
 
 #include <gtest/gtest.h>
 
+#include "support/generated_signals.hpp"
+
 namespace analyzer::dsp {
 namespace {
 
 constexpr float kRate = 48000.0f;
 constexpr std::size_t kSize = 8192;
 
-// The Rust tests build their noise with dsp::Generator, which is ported
-// separately. This is the same xorshift generator and Kellet pink filter, so a
-// seed gives the same signal; swap it for Generator once it exists.
-//
-// Paul Kellet's refined pink filter: white noise shaped to -3 dB per octave.
+// Pink noise at the amplitude every test here used.
 std::vector<float> noise(std::size_t samples, std::uint64_t seed) {
-    constexpr float kAmplitude = 0.5f;
-    std::uint64_t state = seed == 0 ? 0x9E3779B97F4A7C15ull : seed;
-    std::array<float, 7> b{};
-
-    std::vector<float> out(samples);
-    for (float& sample : out) {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        const std::uint64_t scrambled = state * 0x2545F4914F6CDD1Dull;
-        // Top 24 bits, mapped to [-1, 1); the low bits of xorshift are weak.
-        const float white = static_cast<float>(scrambled >> 40) / 8388608.0f - 1.0f;
-
-        b[0] = 0.99886f * b[0] + white * 0.0555179f;
-        b[1] = 0.99332f * b[1] + white * 0.0750759f;
-        b[2] = 0.96900f * b[2] + white * 0.153852f;
-        b[3] = 0.86650f * b[3] + white * 0.3104856f;
-        b[4] = 0.55000f * b[4] + white * 0.5329522f;
-        b[5] = -0.7616f * b[5] - white * 0.0168980f;
-        const float pink = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + white * 0.5362f;
-        b[6] = white * 0.115926f;
-
-        sample = std::clamp(pink * 0.125f * kAmplitude, -1.0f, 1.0f);
-    }
-    return out;
+    return test::pink_noise(samples, 0.5f, seed);
 }
 
 // `source` arriving `delay` samples late, the head filled with silence rather

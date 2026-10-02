@@ -7,7 +7,7 @@
 #include <limits>
 
 #include "base/contract.hpp"
-#include "plot/saturating_cast.hpp"
+#include "base/numeric.hpp"
 
 namespace analyzer::plot {
 
