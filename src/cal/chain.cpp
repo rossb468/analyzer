@@ -44,7 +44,7 @@ Calibration Calibration::with_weighting(Weighting weighting) const {
 }
 
 float Calibration::to_spl(float dbfs, float hz) const noexcept {
-    return dbfs + offset_db_ + microphone_.db_at(hz) + db_at(weighting_, hz);
+    return dbfs + offset_db() + microphone_.db_at(hz) + db_at(weighting_, hz);
 }
 
 void Calibration::apply(std::span<float> bins, float bin_spacing_hz) const noexcept {

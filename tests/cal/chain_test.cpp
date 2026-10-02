@@ -62,6 +62,15 @@ TEST(Calibration, DegenerateChainValuesAreRejected) {
                      .has_value());
 }
 
+// A rig that genuinely needs no correction has still been calibrated. The Rust
+// original decided this by comparing the offset with zero, which made the two
+// indistinguishable; the rule that they are different facts is in CLAUDE.md.
+TEST(Calibration, AMeasuredOffsetOfZeroStillCountsAsCalibrated) {
+    const Calibration cal = Calibration::from_reference_tone(94.0f, 94.0f);
+    EXPECT_TRUE(cal.is_calibrated());
+    EXPECT_EQ(cal.offset_db(), 0.0f);
+}
+
 TEST(Calibration, TheDefaultIsUncalibratedAndSaysSo) {
     const Calibration cal;
     EXPECT_FALSE(cal.is_calibrated());

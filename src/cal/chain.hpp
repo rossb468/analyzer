@@ -75,16 +75,15 @@ public:
     // Whether an SPL offset has been established.
     //
     // When false, output is still dBFS and a UI must label it as such rather
-    // than showing a number that looks like SPL.
-    //
-    // Note this is "the offset is not exactly zero": a rig that genuinely
-    // needs no correction reads as uncalibrated here. Callers that must tell
-    // "not measured" from "measured as zero" keep an optional offset of their
-    // own, as the measurement model does.
-    bool is_calibrated() const noexcept { return offset_db_ != 0.0f; }
+    // than showing a number that looks like SPL. A rig measured as needing no
+    // correction at all is calibrated: "not measured" and "measured as zero"
+    // are different facts, which is why the offset is optional rather than
+    // defaulting to 0.
+    bool is_calibrated() const noexcept { return offset_db_.has_value(); }
 
-    // Decibels added to convert dBFS to dB SPL.
-    float offset_db() const noexcept { return offset_db_; }
+    // Decibels added to convert dBFS to dB SPL; 0 while uncalibrated, so
+    // readings pass through as dBFS.
+    float offset_db() const noexcept { return offset_db_.value_or(0.0f); }
 
     // The weighting in force.
     Weighting weighting() const noexcept { return weighting_; }
@@ -105,8 +104,9 @@ public:
     friend bool operator==(const Calibration&, const Calibration&) = default;
 
 private:
-    // Decibels added to a dBFS reading to get dB SPL.
-    float offset_db_ = 0.0f;
+    // Decibels added to a dBFS reading to get dB SPL. Empty until a
+    // calibration has been taken.
+    std::optional<float> offset_db_;
     // Capsule correction. Flat when unknown.
     ResponseCurve microphone_;
     // Weighting applied on top.
