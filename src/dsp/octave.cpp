@@ -5,6 +5,7 @@
 
 #include "base/contract.hpp"
 #include "base/numeric.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
@@ -70,9 +71,8 @@ std::optional<std::size_t> OctaveBands::first_resolvable(float bin_spacing_hz) c
 void OctaveBands::apply(std::span<const float> bins_db, float bin_spacing_hz,
                         std::span<float> out) const noexcept {
     ANALYZER_EXPECTS(out.size() == bands_.size(), "output must be one per band");
-    // Fewer than two bins is DC alone, and DC belongs to no band. (The Rust
-    // clamped the nearest-bin index to 1..=len-1 below, which panicked for a
-    // lone bin; here that case has nothing to report and floors.)
+    // Fewer than two bins is DC alone, and DC belongs to no band. There is no
+    // bin to borrow for a band too narrow to hold one, so everything floors.
     if (bins_db.size() < 2 || bin_spacing_hz <= 0.0f) {
         std::fill(out.begin(), out.end(), kBandFloorDb);
         return;
@@ -82,7 +82,7 @@ void OctaveBands::apply(std::span<const float> bins_db, float bin_spacing_hz,
     for (std::size_t i = 0; i < bands_.size(); ++i) {
         const Band& band = bands_[i];
         // Skip bin 0: DC belongs to no band. fmax rather than std::max: it
-        // ignores a NaN argument, as Rust's f32::max did.
+        // returns the other argument when one is NaN.
         const std::size_t first = saturating_cast<std::size_t>(
             std::fmax(std::ceil(band.lower_hz / bin_spacing_hz), 1.0f));
         const std::size_t last = std::min(
@@ -91,9 +91,9 @@ void OctaveBands::apply(std::span<const float> bins_db, float bin_spacing_hz,
         if (first <= last) {
             float power = 0.0f;
             for (std::size_t bin = first; bin <= last; ++bin) {
-                power += std::pow(10.0f, bins_db[bin] / 10.0f);
+                power += db_to_power(bins_db[bin]);
             }
-            out[i] = power > 0.0f ? 10.0f * std::log10(power) : kBandFloorDb;
+            out[i] = power > 0.0f ? power_to_db(power) : kBandFloorDb;
         } else {
             // Narrower than the resolution: report the nearest bin rather than
             // nothing, and let is_resolvable flag it as approximate.

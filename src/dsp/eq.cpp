@@ -6,16 +6,16 @@
 #include <numbers>
 #include <utility>
 
+#include "base/units.hpp"
+
 namespace analyzer::dsp {
 
 namespace {
 
-float linear(float db) noexcept {
-    return std::pow(10.0f, db / 20.0f);
-}
-
-float decibels(float linear) noexcept {
-    return 20.0f * std::log10(std::max(linear, 1e-12f));
+// A magnitude as decibels, floored far below anything audible so that a band
+// that nulls a frequency exactly reads as a very deep cut, not minus infinity.
+float level_db(float magnitude) noexcept {
+    return amplitude_to_db(std::max(magnitude, 1e-12f));
 }
 
 // Replace a section's coefficients and leave its delay line alone, so that
@@ -165,7 +165,7 @@ void Equaliser::set_bands(std::vector<FilterBand> bands) {
 }
 
 Complex32 Equaliser::response_at(float hz) const noexcept {
-    Complex32 response(linear(preamp_db_), 0.0f);
+    Complex32 response(db_to_amplitude(preamp_db_), 0.0f);
     for (const Biquad& section : sections_) {
         response *= section.response_at(hz, sample_rate_);
     }
@@ -173,14 +173,14 @@ Complex32 Equaliser::response_at(float hz) const noexcept {
 }
 
 float Equaliser::magnitude_db_at(float hz) const noexcept {
-    return decibels(std::abs(response_at(hz)));
+    return level_db(std::abs(response_at(hz)));
 }
 
 float Equaliser::band_magnitude_db_at(std::size_t index, float hz) const noexcept {
     if (index >= sections_.size()) {
         return 0.0f;
     }
-    return decibels(sections_[index].magnitude_at(hz, sample_rate_));
+    return level_db(sections_[index].magnitude_at(hz, sample_rate_));
 }
 
 void Equaliser::write_magnitude_db(std::span<const float> frequencies,
@@ -230,7 +230,7 @@ void Equaliser::process(std::span<float> samples) noexcept {
     for (Biquad& section : sections_) {
         section.process_block(samples);
     }
-    const float trim = linear(preamp_db_);
+    const float trim = db_to_amplitude(preamp_db_);
     if (trim != 1.0f) {
         for (float& sample : samples) {
             sample *= trim;

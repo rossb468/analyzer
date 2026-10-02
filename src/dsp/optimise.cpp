@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <optional>
 
+#include "base/units.hpp"
+
 namespace analyzer::dsp {
 
 namespace {
@@ -63,7 +65,7 @@ float rms(std::span<const Point> points) {
 // The residual at one point if the section were applied to it.
 float corrected_error(const Biquad& section, const Point& p, float sample_rate) noexcept {
     const float magnitude = section.magnitude_at(p.hz, sample_rate);
-    return magnitude > 0.0f ? p.error_db + 20.0f * std::log10(magnitude) : p.error_db;
+    return magnitude > 0.0f ? p.error_db + amplitude_to_db(magnitude) : p.error_db;
 }
 
 // Subtract a band's response from the residual.
@@ -193,9 +195,9 @@ std::optional<FilterBand> place_filter(std::span<const Point> points,
     }
 
     // The largest error by magnitude. `>=` rather than `>` so that a tie goes
-    // to the later point, as the Rust's max_by does and std::max_element does
-    // not: the choice is arbitrary, but a port that picks differently would
-    // place a different first filter on a symmetric measurement.
+    // to the later point, which std::max_element would not do: the choice is
+    // arbitrary, but picking the other would place a different first filter on
+    // a symmetric measurement.
     const Point* peak = &points.front();
     for (const Point& p : points) {
         if (std::abs(p.error_db) >= std::abs(peak->error_db)) {

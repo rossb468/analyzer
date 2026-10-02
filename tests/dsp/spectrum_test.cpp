@@ -223,7 +223,7 @@ TEST(SpectrumAnalyzer, SilentInputReadsAtTheFloor) {
 
     std::vector<float> db(a.bins());
     a.write_db_fs(db);
-    EXPECT_TRUE(std::all_of(db.begin(), db.end(), [](float d) { return d <= kDbFloor + 1e-3f; }));
+    EXPECT_TRUE(std::all_of(db.begin(), db.end(), [](float d) { return d <= kSpectrumFloorDb + 1e-3f; }));
     EXPECT_TRUE(std::all_of(db.begin(), db.end(), [](float d) { return std::isfinite(d); }))
         << "floor must be finite";
 }

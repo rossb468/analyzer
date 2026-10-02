@@ -3,17 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <numbers>
 
 #include "base/contract.hpp"
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
-
-namespace {
-
-constexpr float kDegreesPerRadian = 180.0f / std::numbers::pi_v<float>;
-
-}  // namespace
 
 TransferFunction::TransferFunction(const TransferConfig& config)
     : sample_rate_(config.sample_rate),
@@ -116,7 +110,7 @@ void TransferFunction::write_magnitude_db(std::span<float> out) const noexcept {
         if (gxx_[k] > 0.0f) {
             const float magnitude = std::abs(gxy_[k]) / gxx_[k];
             if (magnitude > 0.0f) {
-                out[k] = 20.0f * std::log10(magnitude);
+                out[k] = amplitude_to_db(magnitude);
             }
         }
     }
@@ -132,7 +126,7 @@ void TransferFunction::write_response(std::span<Complex32> out) const noexcept {
 void TransferFunction::write_phase_degrees(std::span<float> out) const noexcept {
     ANALYZER_EXPECTS(out.size() == gxy_.size(), "output must be one per bin");
     for (std::size_t k = 0; k < out.size(); ++k) {
-        out[k] = std::arg(gxy_[k]) * kDegreesPerRadian;
+        out[k] = std::arg(gxy_[k]) * kDegreesPerRadian<float>;
     }
 }
 

@@ -3,14 +3,13 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <numbers>
 #include <optional>
+
+#include "base/units.hpp"
 
 namespace analyzer::dsp {
 
 namespace {
-
-constexpr float kTau = 2.0f * std::numbers::pi_v<float>;
 
 // The two quantities every cookbook formula shares.
 struct Design {
@@ -18,7 +17,7 @@ struct Design {
     float alpha;
 };
 
-// Returns nothing for a design that cannot be realised.
+// Returns nullopt for a design that cannot be realised.
 //
 // A centre frequency at or above Nyquist has no meaning, and the caller
 // gets a pass-through rather than a filter full of NaNs. This is not
@@ -35,7 +34,7 @@ std::optional<Design> make_design(float hz, float q, float sample_rate) noexcept
         return std::nullopt;
     }
     q = std::max(q, 1e-3f);
-    const float w = kTau * hz / sample_rate;
+    const float w = kTau<float> * hz / sample_rate;
     return Design{std::cos(w), std::sin(w) / (2.0f * q)};
 }
 
@@ -59,7 +58,7 @@ Complex32 Biquad::response_at(float hz, float sample_rate) const noexcept {
     if (sample_rate <= 0.0f) {
         return {1.0f, 0.0f};
     }
-    const float w = kTau * hz / sample_rate;
+    const float w = kTau<float> * hz / sample_rate;
     const Complex32 z1 = std::polar(1.0f, -w);
     const Complex32 z2 = z1 * z1;
     const Complex32 numerator = Complex32(b0, 0.0f) + z1 * b1 + z2 * b2;
