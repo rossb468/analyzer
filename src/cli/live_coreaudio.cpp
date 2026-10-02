@@ -50,7 +50,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 // Run `step`, turning an audio failure into the harness's own error with the
-// step's name in front, the way the Rust mapped each error with a format string.
+// step's name in front.
 template <class F>
 decltype(auto) context(const std::string& what, F&& step) {
     try {

@@ -79,8 +79,8 @@ zeros would be fabricating data.
     throw CliError(message);
 }
 
-// A number flag's value, with Rust's `str::parse` rules and the harness's
-// message when it does not read.
+// A number flag's value, read by the shared parsers in base/number_text.hpp,
+// and the harness's message when it does not read.
 template <class T>
 T number(const std::string& raw, const std::string& flag) {
     std::optional<T> parsed;
@@ -97,7 +97,7 @@ T number(const std::string& raw, const std::string& flag) {
     return *parsed;
 }
 
-// Walks the argument list the way the Rust popped it: a flag asks for its
+// Walks the argument list front to back: a flag asks for its
 // value, and an optional value is taken only when the next token is a number.
 class Cursor {
 public:

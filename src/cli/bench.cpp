@@ -197,8 +197,8 @@ void meter_duty(std::string& out, double seconds) {
                 offset, std::min<std::size_t>(512, signal.size() - offset)));
         }
         const double duty = seconds_since(start) / seconds;
-        // Rust's derived Debug writes the name without honouring the `{:>7?}`
-        // width it was printed with, so the name is left unpadded to match.
+        // The name is left unpadded, deliberately: the golden output records it
+        // that way.
         append_line(out, "  " + std::string(dsp::to_string(weighting)) + "  " +
                              text::pad_left(text::fixed(duty, 5), 10) + "  " +
                              text::pad_left(text::fixed(1.0 / duty, 0) + "x", 8) + "  " +
